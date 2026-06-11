@@ -5,12 +5,14 @@ run({
   onReady: (self, api) => api.log(`echo-bot ready as ${self.name || self.node}`),
   onMessage: (m, api) => {
 
-    if (m.text === "ping") {
-      return api.reply(m, "pong");
+    switch (m.text) {
+      case "ping":
+        return api.reply(m, "pong");
+      case "hello":
+        return api.reply(m, "hi there!");
+      case "time":
+        return api.reply(m, new Date().toISOString());
     }
-
-    console.log('xxx');
-    //return api.reply(m, `echo: ${m.text}`);
     return Promise.resolve();
   }
 });

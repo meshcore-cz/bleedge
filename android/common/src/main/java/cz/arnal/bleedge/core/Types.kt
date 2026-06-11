@@ -76,7 +76,8 @@ enum class PayloadType(val value: Byte) {
     TEXT_TEST(1),
     MESH_CORE_RAW(2),
     CHAT_PLAIN(3),       // broadcast channel text (UTF-8)
-    CHAT_ENCRYPTED(4);   // direct message: Crypto sealed envelope (CBOR)
+    CHAT_ENCRYPTED(4),   // direct message: Crypto sealed envelope (CBOR)
+    CHANNEL(5);          // MeshCore-compatible group channel: GRP_TXT payload (ChannelCrypto)
 
     companion object {
         fun fromValue(v: Byte) = entries.firstOrNull { it.value == v } ?: TEXT_TEST

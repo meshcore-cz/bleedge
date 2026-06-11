@@ -1,11 +1,13 @@
 package cz.arnal.bleedge.chat.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,14 +29,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cz.arnal.bleedge.chat.ChatViewModel
 import cz.arnal.bleedge.chat.ConnState
+import cz.arnal.bleedge.chat.data.ChannelKind
 import cz.arnal.bleedge.chat.data.Message
 import cz.arnal.bleedge.chat.data.MsgStatus
+import cz.arnal.bleedge.chat.data.isChannelPeer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,15 +54,67 @@ private val avatarColors = listOf(
 )
 
 @Composable
-fun Avatar(seed: String, label: String, size: Int = 44) {
+fun Avatar(seed: String, label: String, size: Int = 44, onClick: (() -> Unit)? = null) {
     val color = avatarColors[(seed.hashCode().ushr(1)) % avatarColors.size]
     val initials = label.trim().take(2).uppercase().ifBlank { "?" }
     Box(
-        modifier = Modifier.size(size.dp).clip(CircleShape).background(color),
+        modifier = Modifier.size(size.dp).clip(CircleShape).background(color)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         Text(initials, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size / 2.6).sp)
     }
+}
+
+/** Renders a public key (hex) compactly as `<e9534284...49e01345>`; blank in → blank out. */
+fun formatPubKey(hex: String): String = when {
+    hex.isBlank() -> ""
+    hex.length >= 16 -> "<${hex.take(8)}...${hex.takeLast(8)}>"
+    else -> "<$hex>"
+}
+
+/**
+ * Channel display label: only name-derived ("public hash") channels get the `#` prefix
+ * (no space, e.g. `#test`); Public and Secret channels show their name as-is.
+ */
+fun channelLabel(name: String, kind: String): String =
+    if (kind == ChannelKind.NAMED) "#$name" else name
+
+/** Channel mentions are stored/transmitted as `@[Name]`; this matches one. */
+val mentionRegex = Regex("""@\[([^\]]+)\]""")
+
+/**
+ * Renders message text, turning `@[Name]` mentions into highlighted, clickable spans
+ * (shown as `@Name`). [onMentionClick] receives the mentioned name. When [enabled] is
+ * false or there are no mentions, falls back to a plain [Text].
+ */
+@Composable
+fun MentionableText(text: String, enabled: Boolean, onMentionClick: (String) -> Unit) {
+    if (!enabled || !text.contains("@[")) {
+        Text(text)
+        return
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    val styles = TextLinkStyles(
+        SpanStyle(
+            background = accent.copy(alpha = 0.18f),
+            color = accent,
+            fontWeight = FontWeight.Medium,
+        )
+    )
+    val annotated = buildAnnotatedString {
+        var last = 0
+        for (m in mentionRegex.findAll(text)) {
+            append(text.substring(last, m.range.first))
+            val name = m.groupValues[1]
+            withLink(LinkAnnotation.Clickable("mention", styles) { onMentionClick(name) }) {
+                append("@$name")
+            }
+            last = m.range.last + 1
+        }
+        append(text.substring(last))
+    }
+    Text(annotated)
 }
 
 /**
@@ -119,10 +180,37 @@ fun formatRelative(ts: Long): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MessageDetailsSheet(msg: Message, vm: ChatViewModel, onDismiss: () -> Unit) {
+fun MessageDetailsSheet(
+    msg: Message,
+    vm: ChatViewModel,
+    onOpenProfile: ((String) -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Message details", style = MaterialTheme.typography.titleMedium)
+            // For a channel message, surface the sender and let it open their profile.
+            if (isChannelPeer(msg.peerHex) && msg.senderHex.isNotBlank()) {
+                val senderLabel = msg.senderName.ifBlank { vm.nameForHex(msg.senderHex) }
+                Row(
+                    Modifier.fillMaxWidth()
+                        .then(if (onOpenProfile != null) Modifier.clickable { onOpenProfile(msg.senderHex) } else Modifier),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Sender", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(seed = msg.senderHex, label = senderLabel, size = 28)
+                        Spacer(Modifier.size(8.dp))
+                        Text(
+                            senderLabel,
+                            fontWeight = FontWeight.Medium,
+                            color = if (onOpenProfile != null) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
             DetailRow("Direction", if (msg.incoming) "Incoming" else "Outgoing")
             DetailRow("Time", "${dayFmt.format(Date(msg.timestampMs))} ${formatClock(msg.timestampMs)}")
             if (!msg.incoming) {

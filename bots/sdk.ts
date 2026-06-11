@@ -13,8 +13,12 @@ export interface Message {
   /** Sender's advertised description (may be empty). */
   name: string;
   text: string;
-  /** true = received on the public broadcast channel; false = a direct (encrypted) message. */
+  /** true = received on a group channel; false = a direct (encrypted) message. */
   channel: boolean;
+  /** Channel display name, when `channel` is true (e.g. "Public"). */
+  channelName?: string;
+  /** In-channel sender name from the GRP_TXT payload, when `channel` is true. */
+  sender?: string;
   /** Unix epoch milliseconds. */
   ts: number;
 }
@@ -22,6 +26,8 @@ export interface Message {
 export interface Self {
   node: string;
   name: string;
+  /** Channels this bot has joined (the first is its primary/default broadcast channel). */
+  channels: string[];
 }
 
 export interface Stats {
@@ -33,12 +39,12 @@ export interface Stats {
 }
 
 export interface Api {
-  /** Reply in kind: broadcast if the message came from the channel, else a direct DM. */
+  /** Reply in kind: post on the originating channel if the message came from one, else a direct DM. */
   reply(m: Message, text: string): void;
   /** Send an encrypted direct message to a node (only works for nodes that have DMed us). */
   dm(to: string, text: string): void;
-  /** Post a plaintext message on the public channel. */
-  broadcast(text: string): void;
+  /** Post a message on a channel. Omit `channel` to use the bot's primary (first joined) channel. */
+  broadcast(text: string, channel?: string): void;
   /** Diagnostic log (goes to the node's stderr, never the chat). */
   log(text: string): void;
   /** Ask the node for live mesh statistics. */
@@ -59,14 +65,14 @@ export function run(handlers: Handlers): void {
 
   const api: Api = {
     reply(m, text) {
-      if (m.channel) api.broadcast(text);
+      if (m.channel) api.broadcast(text, m.channelName);
       else api.dm(m.from, text);
     },
     dm(to, text) {
       send({ type: "reply", to, text });
     },
-    broadcast(text) {
-      send({ type: "broadcast", text });
+    broadcast(text, channel) {
+      send({ type: "broadcast", text, ...(channel ? { channel } : {}) });
     },
     log(text) {
       send({ type: "log", text });

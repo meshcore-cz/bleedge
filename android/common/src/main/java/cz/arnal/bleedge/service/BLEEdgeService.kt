@@ -627,6 +627,14 @@ class BLEEdgeService : Service() {
         return sendData(envelope, PayloadType.CHAT_ENCRYPTED, destination, ttl)
     }
 
+    /**
+     * Broadcasts a pre-built MeshCore-compatible channel payload (GRP_TXT, see
+     * core.ChannelCrypto) to the whole mesh. The caller seals the message with the
+     * channel PSK; the transport just floods it. Returns the packet id.
+     */
+    fun sendChannelMessage(payload: ByteArray, ttl: Byte = 4): ByteArray =
+        sendData(payload, PayloadType.CHANNEL, NodeID.BROADCAST, ttl)
+
     /** Updates this node's diagnostic description and re-announces it immediately. */
     fun setDescription(description: String) {
         if (!::router.isInitialized) return

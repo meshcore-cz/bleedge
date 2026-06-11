@@ -1,5 +1,6 @@
 package cz.arnal.bleedge.chat.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,7 +32,7 @@ import cz.arnal.bleedge.service.TopologyEntry
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NetworkScreen(vm: ChatViewModel) {
+fun NetworkScreen(vm: ChatViewModel, onOpenProfile: (String) -> Unit) {
     val peers by vm.connectedPeers.collectAsState()
     val topology by vm.topology.collectAsState()
     val myNode by vm.nodeId.collectAsState()
@@ -48,7 +49,9 @@ fun NetworkScreen(vm: ChatViewModel) {
             } else {
                 // Keys must be unique across the whole list; a peer is usually also in the
                 // topology below, so namespace the keys to avoid a collision crash.
-                items(peers, key = { "peer:${it.nodeId.toHexString()}" }) { PeerRow(it) }
+                items(peers, key = { "peer:${it.nodeId.toHexString()}" }) { peer ->
+                    PeerRow(peer) { onOpenProfile(peer.nodeId.toHexString()) }
+                }
             }
 
             item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
@@ -58,7 +61,9 @@ fun NetworkScreen(vm: ChatViewModel) {
             if (others.isEmpty()) {
                 item { EmptyLine("No nodes learned yet.") }
             } else {
-                items(others, key = { "topo:${it.nodeId.toHexString()}" }) { TopologyRow(it) }
+                items(others, key = { "topo:${it.nodeId.toHexString()}" }) { node ->
+                    TopologyRow(node) { onOpenProfile(node.nodeId.toHexString()) }
+                }
             }
         }
     }
@@ -85,13 +90,13 @@ private fun EmptyLine(text: String) {
 }
 
 @Composable
-private fun PeerRow(peer: PeerInfo) {
+private fun PeerRow(peer: PeerInfo, onClick: () -> Unit) {
     val label = peer.description.ifBlank { peer.nodeId.toHexString() }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(seed = peer.nodeId.toHexString(), label = label)
+        Avatar(seed = peer.nodeId.toHexString(), label = label, onClick = onClick)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(label, fontWeight = FontWeight.SemiBold, maxLines = 1)
@@ -111,13 +116,13 @@ private fun PeerRow(peer: PeerInfo) {
 }
 
 @Composable
-private fun TopologyRow(node: TopologyEntry) {
+private fun TopologyRow(node: TopologyEntry, onClick: () -> Unit) {
     val label = node.description.ifBlank { node.nodeId.toHexString() }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(seed = node.nodeId.toHexString(), label = label, size = 36)
+        Avatar(seed = node.nodeId.toHexString(), label = label, size = 36, onClick = onClick)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(label, fontWeight = FontWeight.Medium, maxLines = 1)

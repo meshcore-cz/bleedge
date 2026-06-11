@@ -28,6 +28,7 @@ func main() {
 	description := ""
 	botScript := ""
 	bunPath := "bun"
+	botChannels := "Public"
 	verbose := false
 	for i, arg := range os.Args[1:] {
 		switch {
@@ -53,12 +54,16 @@ func main() {
 			bunPath = strings.TrimPrefix(arg, "--bun=")
 		case arg == "--bun" && i+1 < len(os.Args[1:]):
 			bunPath = os.Args[i+2]
+		case strings.HasPrefix(arg, "--channels="):
+			botChannels = strings.TrimPrefix(arg, "--channels=")
+		case arg == "--channels" && i+1 < len(os.Args[1:]):
+			botChannels = os.Args[i+2]
 		case arg == "--help" || arg == "-h":
 			fmt.Fprintf(os.Stderr, `bleedge-macos — interactive BLEEdge node for macOS (1M PHY)
 
 Usage:
   bleedge-macos [--seed-hex <hex>] [--description <str>] [--allow-peer <id,...>] [--verbose]
-  bleedge-macos --bot <script.ts> [--bun <path>]   # run as a bot driven by a Bun script
+  bleedge-macos --bot <script.ts> [--bun <path>] [--channels <name,...>]   # run as a bot driven by a Bun script
 
 Interactive commands (type and press Enter):
   <text>             broadcast a message on the public channel
@@ -70,8 +75,11 @@ Interactive commands (type and press Enter):
 
 Bot mode (--bot): the node runs headless and forwards chat messages to a Bun
   JS/TS script over stdin/stdout JSON. The script can reply (encrypted DM),
-  broadcast on the channel, and query mesh stats. See bots/ for examples:
+  broadcast on a channel, and query mesh stats. By default the bot listens on
+  the Public channel; pass --channels to join one or more (comma-separated,
+  e.g. --channels "Public,rock climbers"). See bots/ for examples:
     bleedge-macos --bot bots/time-bot.ts
+    bleedge-macos --bot bots/echo-bot.ts --channels "Public,dev"
 
 NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
       Use bleedge-listen on Linux for the Long Range PoC.
@@ -127,7 +135,8 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 	// In bot mode, the bridge (set below) consumes incoming messages; otherwise we
 	// print them interactively, decrypting encrypted DMs with our identity.
 	var theBot *bot
-	node := blenode.New(blenode.Config{
+	var node *blenode.Node
+	node = blenode.New(blenode.Config{
 		Identity:    identity,
 		Description: description,
 		Caps:        core.Capabilities(uint8(core.CapSender) | uint8(core.CapReceiver) | uint8(core.CapRelay)),
@@ -140,6 +149,12 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 				return
 			}
 			ts := time.Now().Format("15:04:05")
+			if ptype == core.PayloadTypeChannel {
+				if in, ok := node.DecodeChannel(payload); ok {
+					fmt.Printf("\n[%s] #%s %s: %s\n> ", ts, in.Channel, in.Sender, in.Text)
+				}
+				return
+			}
 			fmt.Printf("\n[%s] MSG from %s: %s\n> ", ts, from, renderIncoming(ptype, payload, identity))
 		},
 		OnPeerConnect: func(id core.NodeID) {
@@ -158,12 +173,14 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 
 	// Bot mode: start the Bun bridge and run headless until interrupted.
 	if botScript != "" {
-		b, err := startBot(ctx, node, bunPath, botScript)
+		channels := parseChannelList(botChannels)
+		b, err := startBot(ctx, node, bunPath, botScript, channels)
 		if err != nil {
 			fatalf("cannot start bot: %v", err)
 		}
 		theBot = b
-		fmt.Fprintf(os.Stderr, "BLEEdge macOS bot  node=%s  script=%s\n", identity.NodeID(), botScript)
+		fmt.Fprintf(os.Stderr, "BLEEdge macOS bot  node=%s  script=%s  channels=%v\n",
+			identity.NodeID(), botScript, channels)
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -176,9 +193,12 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 
 	// Banner
 	fmt.Printf("BLEEdge macOS  node=%s  phy=1m\n", identity.NodeID())
-	fmt.Println("Advertising and scanning... type a message and press Enter to broadcast.")
-	fmt.Println("Commands: /dm <id> <text>  /peers  /neighbors  /topology  /quit")
+	fmt.Println("Advertising and scanning... type a message and press Enter to send it to the current channel.")
+	fmt.Println("Commands: /dm <id> <text>  /join <name>|public  /channels  /peers  /neighbors  /topology  /quit")
 	fmt.Println()
+
+	// Plain lines are sent to the current channel; defaults to MeshCore's Public channel.
+	current := node.JoinPublicChannel()
 
 	// Interactive loop
 	scanner := bufio.NewScanner(os.Stdin)
@@ -251,7 +271,30 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 				}
 			}
 
+		case "/channels", "/c":
+			for _, ch := range node.Channels() {
+				marker := "  "
+				if string(ch.Secret) == string(current.Secret) {
+					marker = "* "
+				}
+				fmt.Printf("  %s#%s  hash=0x%02x\n", marker, ch.Name, ch.Hash)
+			}
+
 		default:
+			if strings.HasPrefix(line, "/join ") {
+				name := strings.TrimSpace(strings.TrimPrefix(line, "/join "))
+				if name == "" {
+					fmt.Println("  usage: /join <name>  (use 'public' for the Public channel)")
+					continue
+				}
+				if strings.EqualFold(name, "public") {
+					current = node.JoinPublicChannel()
+				} else {
+					current = node.JoinNamedChannel(name)
+				}
+				fmt.Printf("  joined #%s (hash=0x%02x) — now the current channel\n", current.Name, current.Hash)
+				continue
+			}
 			if strings.HasPrefix(line, "/dm ") {
 				rest := strings.TrimSpace(strings.TrimPrefix(line, "/dm "))
 				parts := strings.SplitN(rest, " ", 2)
@@ -272,18 +315,33 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 				continue
 			}
 			if strings.HasPrefix(line, "/") {
-				fmt.Println("  unknown command. try /dm /peers /neighbors /topology /quit")
+				fmt.Println("  unknown command. try /dm /join /channels /peers /neighbors /topology /quit")
 				continue
 			}
-			if err := node.SendChannel(line); err != nil {
+			if err := node.SendToChannel(current.Secret, line); err != nil {
 				fmt.Printf("  send error: %v\n", err)
 			} else {
-				fmt.Printf("  sent to channel: %s\n", line)
+				fmt.Printf("  sent to #%s: %s\n", current.Name, line)
 			}
 		}
 	}
 
 	<-ctx.Done()
+}
+
+// parseChannelList splits a comma-separated channel list, trimming blanks and
+// falling back to the Public channel when nothing usable is given.
+func parseChannelList(s string) []string {
+	var names []string
+	for _, part := range strings.Split(s, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		names = []string{"Public"}
+	}
+	return names
 }
 
 func fatalf(format string, args ...any) {

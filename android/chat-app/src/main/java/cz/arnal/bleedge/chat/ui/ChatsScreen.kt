@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,7 @@ import cz.arnal.bleedge.chat.ConversationSummary
 fun ChatsScreen(
     vm: ChatViewModel,
     onOpenConversation: (String) -> Unit,
+    onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val conversations by vm.conversations.collectAsState()
@@ -152,7 +154,11 @@ fun ChatsScreen(
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(visible, key = { it.peerHex }) { conv ->
-                    ConversationRow(conv) { onOpenConversation(conv.peerHex) }
+                    ConversationRow(
+                        conv,
+                        onClick = { onOpenConversation(conv.peerHex) },
+                        onAvatarClick = { onOpenProfile(conv.peerHex) },
+                    )
                 }
             }
         }
@@ -172,15 +178,25 @@ fun ChatsScreen(
 }
 
 @Composable
-private fun ConversationRow(conv: ConversationSummary, onClick: () -> Unit) {
+private fun ConversationRow(conv: ConversationSummary, onClick: () -> Unit, onAvatarClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(seed = conv.peerHex, label = conv.title)
+        Avatar(seed = conv.peerHex, label = conv.title, onClick = onAvatarClick)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(conv.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val pub = formatPubKey(conv.pubKeyHex)
+            if (pub.isNotEmpty()) {
+                Text(
+                    pub,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
             Text(
                 conv.lastText,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

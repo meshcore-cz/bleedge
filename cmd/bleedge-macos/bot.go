@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,15 +23,16 @@ import (
 // Communication is newline-delimited JSON over the Bun process's stdin/stdout:
 //
 //	Go → Bun (events, on Bun's stdin):
-//	  {"type":"ready","self":{"node":"<hex>","name":"<desc>"}}
-//	  {"type":"message","from":"<hex>","name":"<desc>","text":"...","channel":bool,"ts":<unixMillis>}
+//	  {"type":"ready","self":{"node":"<hex>","name":"<desc>","channels":["Public",...]}}
+//	  {"type":"message","from":"<hex>","name":"<desc>","text":"...","channel":bool,
+//	      "channelName":"<name>","sender":"<name>","ts":<unixMillis>}   // channelName/sender only for channel msgs
 //	  {"type":"stats","peers":N,"neighbors":N,"topology":N,"node":"<hex>","name":"<desc>"}
 //
 //	Bun → Go (commands, on Bun's stdout):
-//	  {"type":"reply","to":"<hex>","text":"..."}   // E2E-encrypted DM back to a sender
-//	  {"type":"broadcast","text":"..."}            // plaintext public channel
-//	  {"type":"query","what":"stats"}              // ask Go for live mesh stats
-//	  {"type":"log","text":"..."}                  // diagnostic, printed to stderr
+//	  {"type":"reply","to":"<hex>","text":"..."}            // E2E-encrypted DM back to a sender
+//	  {"type":"broadcast","text":"...","channel":"<name>"}  // channel msg; channel optional, defaults to primary
+//	  {"type":"query","what":"stats"}                       // ask Go for live mesh stats
+//	  {"type":"log","text":"..."}                           // diagnostic, printed to stderr
 //
 // Bun scripts must keep stdout clean (protocol JSON only); use console.error for logs.
 type bot struct {
@@ -38,9 +40,10 @@ type bot struct {
 	mu        sync.Mutex
 	stdin     io.Writer
 	pubByNode map[core.NodeID][]byte // sender Ed25519 pubkeys learned from inbound DMs, for replies
+	channels  []*blenode.Channel     // channels this bot listens/broadcasts on; channels[0] is the default
 }
 
-func startBot(ctx context.Context, node *blenode.Node, bunPath, script string) (*bot, error) {
+func startBot(ctx context.Context, node *blenode.Node, bunPath, script string, channelNames []string) (*bot, error) {
 	cmd := exec.CommandContext(ctx, bunPath, "run", script)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -55,18 +58,59 @@ func startBot(ctx context.Context, node *blenode.Node, bunPath, script string) (
 		return nil, fmt.Errorf("start bun (%s): %w", bunPath, err)
 	}
 
+	// Join the configured channels (default: Public). Public is auto-joined by
+	// the node; "Public" is recognised specially, anything else is a named channel.
 	b := &bot{node: node, stdin: stdin, pubByNode: make(map[core.NodeID][]byte)}
+	for _, name := range channelNames {
+		var ch *blenode.Channel
+		if name == "Public" {
+			ch = node.JoinPublicChannel()
+		} else {
+			ch = node.JoinNamedChannel(name)
+		}
+		b.channels = append(b.channels, ch)
+	}
+
 	go b.readLoop(stdout)
 	go func() {
 		_ = cmd.Wait()
 		fmt.Fprintln(os.Stderr, "bot: bun process exited")
 	}()
 
+	chNames := make([]string, len(b.channels))
+	for i, ch := range b.channels {
+		chNames[i] = ch.Name
+	}
 	b.send(map[string]any{
 		"type": "ready",
-		"self": map[string]any{"node": node.NodeID().String(), "name": node.Description()},
+		"self": map[string]any{
+			"node":     node.NodeID().String(),
+			"name":     node.Description(),
+			"channels": chNames,
+		},
 	})
 	return b, nil
+}
+
+// defaultChannel returns the bot's primary channel (the first configured one).
+func (b *bot) defaultChannel() *blenode.Channel {
+	if len(b.channels) == 0 {
+		return nil
+	}
+	return b.channels[0]
+}
+
+// channelByName returns a configured channel by name (case-insensitive), or the
+// default channel when name is empty / unknown.
+func (b *bot) channelByName(name string) *blenode.Channel {
+	if name != "" {
+		for _, ch := range b.channels {
+			if strings.EqualFold(ch.Name, name) {
+				return ch
+			}
+		}
+	}
+	return b.defaultChannel()
 }
 
 func (b *bot) send(v any) {
@@ -81,41 +125,49 @@ func (b *bot) send(v any) {
 
 // onIncoming is wired to the node's OnMessage callback.
 func (b *bot) onIncoming(from core.NodeID, ptype core.PayloadType, payload []byte) {
-	var text string
-	channel := false
+	msg := map[string]any{
+		"type": "message",
+		"from": from.String(),
+		"name": b.node.DescriptionFor(from),
+		"ts":   time.Now().UnixMilli(),
+	}
 	switch ptype {
 	case core.PayloadTypeChatEncrypted:
 		t, ok := core.OpenChat(payload, b.node.Identity())
 		if !ok {
 			return // not for us / undecryptable
 		}
-		text = t
+		msg["text"] = t
+		msg["channel"] = false
 		if pub := core.ChatEnvelopeSenderPub(payload); len(pub) == 32 {
 			b.mu.Lock()
 			b.pubByNode[from] = pub
 			b.mu.Unlock()
 		}
-	case core.PayloadTypeChatPlain, core.PayloadTypeTextTest:
-		text = string(payload)
-		channel = true
+	case core.PayloadTypeChannel:
+		in, ok := b.node.DecodeChannel(payload)
+		if !ok {
+			return // not on a channel we've joined
+		}
+		msg["text"] = in.Text
+		msg["channel"] = true
+		msg["channelName"] = in.Channel
+		msg["sender"] = in.Sender
+	case core.PayloadTypeTextTest:
+		msg["text"] = string(payload)
+		msg["channel"] = true
 	default:
 		return
 	}
-	b.send(map[string]any{
-		"type":    "message",
-		"from":    from.String(),
-		"name":    b.node.DescriptionFor(from),
-		"text":    text,
-		"channel": channel,
-		"ts":      time.Now().UnixMilli(),
-	})
+	b.send(msg)
 }
 
 type botCommand struct {
-	Type string `json:"type"`
-	To   string `json:"to"`
-	Text string `json:"text"`
-	What string `json:"what"`
+	Type    string `json:"type"`
+	To      string `json:"to"`
+	Text    string `json:"text"`
+	What    string `json:"what"`
+	Channel string `json:"channel"` // optional channel name for "broadcast"; defaults to the bot's primary channel
 }
 
 func (b *bot) readLoop(r io.Reader) {
@@ -152,7 +204,13 @@ func (b *bot) readLoop(r io.Reader) {
 				fmt.Fprintf(os.Stderr, "bot reply send: %v\n", err)
 			}
 		case "broadcast":
-			if err := b.node.SendChannel(c.Text); err != nil {
+			// Broadcasts go to the named channel, or the bot's primary channel by default.
+			ch := b.channelByName(c.Channel)
+			if ch == nil {
+				fmt.Fprintln(os.Stderr, "bot broadcast: bot has no channels to broadcast on")
+				continue
+			}
+			if err := b.node.SendToChannel(ch.Secret, c.Text); err != nil {
 				fmt.Fprintf(os.Stderr, "bot broadcast: %v\n", err)
 			}
 		case "query":

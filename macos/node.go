@@ -9,6 +9,7 @@ package macos
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -45,6 +46,9 @@ type Node struct {
 	peers     map[string]*MacPeerLink
 	// notifiers for PACKET_OUT (server-side subscribers)
 	notifiers map[string]ble.Notifier
+
+	// joined channels keyed by lowercase PSK hex (see channels.go)
+	channels map[string]*Channel
 
 	logFn            func(string)
 	onMessage        func(core.NodeID, core.PayloadType, []byte)
@@ -84,8 +88,10 @@ func New(cfg Config) *Node {
 		verbose:   cfg.Verbose,
 		peers:     make(map[string]*MacPeerLink),
 		notifiers: make(map[string]ble.Notifier),
+		channels:  make(map[string]*Channel),
 		logFn:     cfg.LogFn,
 	}
+	n.JoinPublicChannel() // MeshCore's default Public channel, like the Android app
 	if n.logFn == nil {
 		n.logFn = func(s string) { log.Println(s) }
 	}
@@ -388,7 +394,60 @@ func (n *Node) handleIncomingFrame(raw []byte, fromPeer *core.NodeID) {
 	n.learnNeighbor(pkt)
 
 	actions := n.router.HandlePacket(pkt, fromPeer)
+	// In verbose mode, dump the full packet as JSON the first time we see it (the router
+	// dedups by id, so relay re-sightings of the same packet are flagged as duplicates and
+	// skipped here). Goes to stderr via logf, so it's safe in bot mode too.
+	if n.verbose && !isDuplicateDrop(actions) {
+		n.logPacketJSON(pkt, data, fromPeer)
+	}
 	n.executeActions(actions)
+}
+
+// isDuplicateDrop reports whether the router dropped the packet as an already-seen duplicate.
+func isDuplicateDrop(actions []core.Action) bool {
+	for _, a := range actions {
+		if a.Type == core.ActionDrop && a.Reason == string(core.DropDuplicate) {
+			return true
+		}
+	}
+	return false
+}
+
+// logPacketJSON prints a one-line JSON dump of a freshly-seen packet: the raw bytes plus
+// the decoded header/payload. Verbose-only and called on first occurrence (see caller).
+func (n *Node) logPacketJSON(pkt core.Packet, raw []byte, fromPeer *core.NodeID) {
+	peer := ""
+	if fromPeer != nil {
+		peer = fromPeer.String()
+	}
+	rec := map[string]any{
+		"event":       "rx_packet",
+		"time":        time.Now().Format(time.RFC3339Nano),
+		"fromPeer":    peer,
+		"rawHex":      hex.EncodeToString(raw),
+		"rawLen":      len(raw),
+		"version":     pkt.Version,
+		"type":        uint8(pkt.Type),
+		"id":          hex.EncodeToString(pkt.ID[:]),
+		"source":      pkt.Source.String(),
+		"destination": pkt.Destination.String(),
+		"broadcast":   pkt.IsBroadcast(),
+		"mode":        uint8(pkt.Mode),
+		"ttl":         pkt.TTL,
+		"routeCursor": pkt.RouteCursor,
+		"route":       nodeIDs(pkt.Route),
+		"trace":       nodeIDs(pkt.Trace),
+		"payloadType": uint8(pkt.PayloadType),
+		"payloadLen":  len(pkt.Payload),
+		"payloadHex":  hex.EncodeToString(pkt.Payload),
+		"seq":         pkt.Seq,
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		n.logf("packet json marshal error: %v", err)
+		return
+	}
+	n.logf("%s", b)
 }
 
 func (n *Node) learnNeighbor(pkt core.Packet) {
@@ -555,11 +614,6 @@ func (n *Node) buildNodeInfo() []byte {
 // SendText sends a plaintext test message to dst (zero = broadcast).
 func (n *Node) SendText(dst core.NodeID, text string, ttl uint8) error {
 	return n.sendData(dst, core.PayloadTypeTextTest, []byte(text), ttl)
-}
-
-// SendChannel broadcasts a plaintext chat message on the public channel.
-func (n *Node) SendChannel(text string) error {
-	return n.sendData(core.NodeID{}, core.PayloadTypeChatPlain, []byte(text), 4)
 }
 
 // SendChatTo sends an end-to-end encrypted direct message to dst, encrypted to

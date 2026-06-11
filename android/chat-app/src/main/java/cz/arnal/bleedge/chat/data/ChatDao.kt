@@ -36,4 +36,23 @@ interface ChatDao {
 
     @Query("SELECT * FROM contacts WHERE nodeHex = :nodeHex LIMIT 1")
     suspend fun contactByNode(nodeHex: String): Contact?
+
+    @Query("DELETE FROM contacts WHERE nodeHex = :nodeHex")
+    suspend fun deleteContact(nodeHex: String)
+
+    // ---- channels ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertChannel(channel: Channel)
+
+    @Query("SELECT * FROM channels ORDER BY name")
+    fun channels(): Flow<List<Channel>>
+
+    @Query("SELECT * FROM channels WHERE pskHex = :pskHex LIMIT 1")
+    suspend fun channelByPsk(pskHex: String): Channel?
+
+    @Query("SELECT * FROM channels WHERE hashByte = :hashByte")
+    suspend fun channelsByHash(hashByte: Int): List<Channel>
+
+    @Query("DELETE FROM channels WHERE pskHex = :pskHex")
+    suspend fun deleteChannel(pskHex: String)
 }

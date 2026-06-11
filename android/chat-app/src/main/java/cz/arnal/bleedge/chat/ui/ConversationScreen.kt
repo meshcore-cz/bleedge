@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,19 +50,41 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cz.arnal.bleedge.chat.ChatViewModel
 import cz.arnal.bleedge.chat.shortHex
-import cz.arnal.bleedge.chat.data.CHANNEL_PEER
 import cz.arnal.bleedge.chat.data.Message
+import cz.arnal.bleedge.chat.data.channelPskHexOf
+import cz.arnal.bleedge.chat.data.isChannelPeer
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun ConversationScreen(vm: ChatViewModel, peerHex: String, onBack: (() -> Unit)?) {
-    val isChannel = peerHex == CHANNEL_PEER
+fun ConversationScreen(
+    vm: ChatViewModel,
+    peerHex: String,
+    onBack: (() -> Unit)?,
+    onOpenProfile: ((String) -> Unit)? = null,
+) {
+    val isChannel = isChannelPeer(peerHex)
     val messages by remember(peerHex) { vm.messagesFor(peerHex) }.collectAsState()
     val title by remember(peerHex) { vm.displayNameFor(peerHex) }.collectAsState()
     var draft by remember { mutableStateOf("") }
     var detailsFor by remember { mutableStateOf<Message?>(null) }
 
     LaunchedEffect(peerHex, messages.size) { vm.markRead(peerHex) }
+
+    // Channel participants (name → node id) learned from the channel's messages; used to
+    // resolve a tapped @mention to a profile, and to power the @-autocomplete.
+    val mentionTargets = remember(messages) {
+        messages.filter { it.senderName.isNotBlank() && it.senderHex.isNotBlank() }
+            .associate { it.senderName to it.senderHex }
+    }
+    val onMentionClick: (String) -> Unit = { name ->
+        mentionTargets[name]?.let { hex -> onOpenProfile?.invoke(hex) }
+    }
+
+    // While typing "@partial" at the end of the draft, suggest matching participants.
+    val mentionQuery = if (isChannel) mentionQueryOf(draft) else null
+    val suggestions = if (mentionQuery != null) {
+        mentionTargets.keys.filter { it.contains(mentionQuery, ignoreCase = true) }.sorted().take(6)
+    } else emptyList()
 
     Scaffold(
         topBar = {
@@ -72,21 +97,36 @@ fun ConversationScreen(vm: ChatViewModel, peerHex: String, onBack: (() -> Unit)?
                     }
                 },
                 title = {
-                    Column {
-                        Text(if (isChannel) "Channel" else title, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (isChannel) "Public broadcast · not encrypted" else "End-to-end encrypted",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = if (onOpenProfile != null) {
+                            Modifier.clickable { onOpenProfile(peerHex) }
+                        } else Modifier,
+                    ) {
+                        Avatar(seed = peerHex, label = title, size = 36)
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(title, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (isChannel) "Channel · shared-key encrypted" else "End-to-end encrypted",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 },
             )
         },
         bottomBar = {
-            MessageInput(draft, onChange = { draft = it }, fullScreen = onBack != null) {
-                vm.sendChat(peerHex, draft)
-                draft = ""
+            Column {
+                if (suggestions.isNotEmpty()) {
+                    MentionSuggestions(suggestions) { name -> draft = insertMention(draft, name) }
+                }
+                MessageInput(draft, onChange = { draft = it }, fullScreen = onBack != null) {
+                    if (isChannel) vm.sendChannelMessage(channelPskHexOf(peerHex), draft)
+                    else vm.sendChat(peerHex, draft)
+                    draft = ""
+                }
             }
         },
         // TopAppBar + composer handle their own system-bar/ime insets.
@@ -111,18 +151,26 @@ fun ConversationScreen(vm: ChatViewModel, peerHex: String, onBack: (() -> Unit)?
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             items(messages, key = { it.id }) { msg ->
-                MessageBubble(msg, isChannel, vm.nameForHex(msg.senderHex)) { detailsFor = msg }
+                val sender = if (isChannel) msg.senderName.ifBlank { vm.nameForHex(msg.senderHex) }
+                else vm.nameForHex(msg.senderHex)
+                MessageBubble(msg, isChannel, sender, onMentionClick) { detailsFor = msg }
             }
         }
     }
 
     detailsFor?.let { msg ->
-        MessageDetailsSheet(msg, vm) { detailsFor = null }
+        MessageDetailsSheet(msg, vm, onOpenProfile = onOpenProfile) { detailsFor = null }
     }
 }
 
 @Composable
-private fun MessageBubble(msg: Message, isChannel: Boolean, senderLabel: String, onClick: () -> Unit) {
+private fun MessageBubble(
+    msg: Message,
+    isChannel: Boolean,
+    senderLabel: String,
+    onMentionClick: (String) -> Unit,
+    onClick: () -> Unit,
+) {
     val mine = !msg.incoming
     Row(
         Modifier.fillMaxWidth(),
@@ -143,7 +191,7 @@ private fun MessageBubble(msg: Message, isChannel: Boolean, senderLabel: String,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Text(msg.text)
+                MentionableText(msg.text, enabled = isChannel, onMentionClick = onMentionClick)
                 Spacer(Modifier.size(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
@@ -190,3 +238,29 @@ private fun MessageInput(
         }
     }
 }
+
+/** Horizontal strip of @-mention candidates shown above the composer while typing "@". */
+@Composable
+private fun MentionSuggestions(names: List<String>, onPick: (String) -> Unit) {
+    Surface(tonalElevation = 3.dp) {
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(names, key = { it }) { name ->
+                AssistChip(onClick = { onPick(name) }, label = { Text("@$name") })
+            }
+        }
+    }
+}
+
+/** The active mention query: the partial after a trailing "@" (word-boundary), or null. */
+fun mentionQueryOf(draft: String): String? =
+    Regex("""(?:^|\s)@([^\s@]*)$""").find(draft)?.groupValues?.get(1)
+
+/** Replaces the trailing "@partial" the user is typing with a `@[Name]` token (and a space). */
+fun insertMention(draft: String, name: String): String =
+    Regex("""(?:^|\s)@([^\s@]*)$""").replace(draft) { m ->
+        val lead = if (m.value.startsWith("@")) "" else m.value.take(1)
+        "$lead@[$name] "
+    }

@@ -46,7 +46,7 @@ build-macos:
 #   make bot SCRIPT=bots/time-bot.ts
 SCRIPT ?= bots/echo-bot.ts
 bot: build-macos
-	./bin/bleedge-macos --bot $(SCRIPT) --verbose
+	./bin/bleedge-macos --bot $(SCRIPT) --verbose --channels "Public,test,dev"
 
 build-esp32:
 	arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6 firmware/xiao_esp32c6

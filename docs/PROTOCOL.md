@@ -183,7 +183,7 @@ cross-language compactness. Field order is irrelevant; keys are authoritative.
 | 8 | `route_cursor` | uint8 | index into `route` (source-route) |
 | 9 | `route` | array of 8-byte | ordered next-hops (source-route) |
 | 10 | `trace` | array of 8-byte | hops visited so far (appended per hop) |
-| 11 | `payload_type` | uint8 | 1=TEXT_TEST, 2=MESHCORE_RAW, 3=CHAT_PLAIN, 4=CHAT_ENCRYPTED |
+| 11 | `payload_type` | uint8 | 1=TEXT_TEST, 2=MESHCORE_RAW, 3=CHAT_PLAIN, 4=CHAT_ENCRYPTED, 5=CHANNEL |
 | 12 | `payload` | bytes | opaque |
 | 13 | `seq` | uint32 | ANNOUNCE sequence; omitted when 0 |
 
@@ -270,6 +270,31 @@ mesh treats both as opaque `payload` and routes them like any other DATA packet
   symmetric, the recipient re-derives the key from `sender_pub` (carried in the
   envelope) and its own private key. The sender's public key is learned from the
   recipient's signed ANNOUNCE (key 6).
+
+### 4.4 Channels — MeshCore-compatible (`CHANNEL`, payload_type 5)
+
+Group channels mirror MeshCore (`meshcore-cz/meshpkt`) so they can interoperate. A
+channel is identified by a 16-byte pre-shared key (PSK). The BLEEdge `payload` (key 12)
+**is** the MeshCore GRP_TXT payload, broadcast (`destination = 0`, FLOOD):
+
+```
+payload     = channelHash[1] | mac[2] | ciphertext[...]
+plaintext   = timestamp[4 LE] | flags[1] | "SenderName: MessageText"   (zero-padded to 16)
+ciphertext  = AES-128-ECB(secret, plaintext)
+mac         = HMAC-SHA256(key = secret16 ‖ zero16, ciphertext)[:2]
+channelHash = SHA-256(secret)[0]
+```
+
+`flags`: upper 6 bits = text type (0 = plain), lower 2 = attempt count.
+
+PSK derivation by channel kind:
+- **Public** — fixed PSK `8b3387e9c5cdea6ac9e5edbaa115cd72` (channelHash `0x11`).
+- **Named ("public hash")** — `secret = SHA-256(name)[:16]`.
+- **Secret** — a user-supplied 16-byte key (32 hex chars used raw; otherwise `SHA-256(passphrase)[:16]`).
+
+A receiver matches an inbound packet to a joined channel by `channelHash`, then confirms
+with the MAC (the hash is 1 byte, so collisions are resolved by which PSK's MAC verifies).
+Reference impls: Kotlin `core.ChannelCrypto` and Go `core.SealChannel`/`OpenChannel` (byte-identical). Broadcast → no per-message ACK.
 
 ---
 
