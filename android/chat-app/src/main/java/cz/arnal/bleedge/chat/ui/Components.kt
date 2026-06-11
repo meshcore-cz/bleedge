@@ -1,5 +1,6 @@
 package cz.arnal.bleedge.chat.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,19 +26,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.LinkAnnotation
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import cz.arnal.bleedge.chat.AvatarStyle
 import cz.arnal.bleedge.chat.ChatViewModel
 import cz.arnal.bleedge.chat.ConnState
 import cz.arnal.bleedge.chat.data.ChannelKind
@@ -53,16 +54,48 @@ private val avatarColors = listOf(
     Color(0xFFEF6C00), Color(0xFF00838F), Color(0xFFAD1457), Color(0xFF4527A0),
 )
 
+/** How avatars are drawn app-wide; provided at the root from the user's setting. */
+val LocalAvatarStyle = staticCompositionLocalOf { AvatarStyle.IDENTICON }
+
 @Composable
 fun Avatar(seed: String, label: String, size: Int = 44, onClick: (() -> Unit)? = null) {
-    val color = avatarColors[(seed.hashCode().ushr(1)) % avatarColors.size]
-    val initials = label.trim().take(2).uppercase().ifBlank { "?" }
-    Box(
-        modifier = Modifier.size(size.dp).clip(CircleShape).background(color)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(initials, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size / 2.6).sp)
+    val base = Modifier.size(size.dp).clip(CircleShape)
+        .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+    if (LocalAvatarStyle.current == AvatarStyle.IDENTICON) {
+        Identicon(seed, base)
+    } else {
+        val color = avatarColors[(seed.hashCode().ushr(1)) % avatarColors.size]
+        val initials = label.trim().take(2).uppercase().ifBlank { "?" }
+        Box(base.background(color), contentAlignment = Alignment.Center) {
+            Text(initials, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size / 2.6).sp)
+        }
+    }
+}
+
+/** A deterministic GitHub-style identicon: a 5×5 left-right-mirrored grid hashed from [seed]. */
+@Composable
+private fun Identicon(seed: String, modifier: Modifier) {
+    val digest = remember(seed) { java.security.MessageDigest.getInstance("MD5").digest(seed.toByteArray()) }
+    val fg = remember(seed) {
+        val hue = (digest[0].toInt() and 0xFF) / 255f * 360f
+        Color.hsv(hue, 0.55f, 0.85f)
+    }
+    val bg = Color(0xFFEDEDED)
+    Canvas(modifier.background(bg)) {
+        val cell = size.minDimension / 5f
+        for (row in 0 until 5) {
+            for (col in 0 until 3) {
+                val on = (digest[row * 3 + col].toInt() and 1) == 0
+                if (!on) continue
+                for (c in intArrayOf(col, 4 - col)) {
+                    drawRect(
+                        color = fg,
+                        topLeft = Offset(c * cell, row * cell),
+                        size = Size(cell, cell),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -82,40 +115,6 @@ fun channelLabel(name: String, kind: String): String =
 
 /** Channel mentions are stored/transmitted as `@[Name]`; this matches one. */
 val mentionRegex = Regex("""@\[([^\]]+)\]""")
-
-/**
- * Renders message text, turning `@[Name]` mentions into highlighted, clickable spans
- * (shown as `@Name`). [onMentionClick] receives the mentioned name. When [enabled] is
- * false or there are no mentions, falls back to a plain [Text].
- */
-@Composable
-fun MentionableText(text: String, enabled: Boolean, onMentionClick: (String) -> Unit) {
-    if (!enabled || !text.contains("@[")) {
-        Text(text)
-        return
-    }
-    val accent = MaterialTheme.colorScheme.primary
-    val styles = TextLinkStyles(
-        SpanStyle(
-            background = accent.copy(alpha = 0.18f),
-            color = accent,
-            fontWeight = FontWeight.Medium,
-        )
-    )
-    val annotated = buildAnnotatedString {
-        var last = 0
-        for (m in mentionRegex.findAll(text)) {
-            append(text.substring(last, m.range.first))
-            val name = m.groupValues[1]
-            withLink(LinkAnnotation.Clickable("mention", styles) { onMentionClick(name) }) {
-                append("@$name")
-            }
-            last = m.range.last + 1
-        }
-        append(text.substring(last))
-    }
-    Text(annotated)
-}
 
 /**
  * Number of intermediate relays a packet passed through. The stored route is the packet

@@ -9,6 +9,7 @@ import android.os.IBinder
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
@@ -50,6 +51,18 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 private val SEED_KEY = stringPreferencesKey("seed")
 private val DESC_KEY = stringPreferencesKey("description")
 private val PHY_MODE_KEY = stringPreferencesKey("phy_mode")
+private val AVATAR_STYLE_KEY = stringPreferencesKey("avatar_style")
+private val PUBLIC_SEEDED_KEY = booleanPreferencesKey("public_seeded")
+
+/** How contact/channel avatars are drawn. */
+enum class AvatarStyle(val value: String) {
+    IDENTICON("identicon"), // default: a deterministic identicon from the seed
+    INITIALS("initials");   // colored circle with initials
+
+    companion object {
+        fun fromValue(v: String?) = entries.firstOrNull { it.value == v } ?: IDENTICON
+    }
+}
 
 /** A row in the Chats list. */
 data class ConversationSummary(
@@ -118,6 +131,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _description = MutableStateFlow("")
     val description: StateFlow<String> = _description.asStateFlow()
+
+    private val _avatarStyle = MutableStateFlow(AvatarStyle.IDENTICON)
+    val avatarStyle: StateFlow<AvatarStyle> = _avatarStyle.asStateFlow()
 
     val nodeId: StateFlow<NodeID> = _service.flatMapLatest {
         it?.nodeId ?: flowOf(NodeID(ByteArray(8)))
@@ -266,14 +282,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val phy = PHYMode.fromString(pref[PHY_MODE_KEY] ?: PHYMode.DEBUG_1M.value)
         _seedHex.value = seedHex
         _description.value = desc
+        _avatarStyle.value = AvatarStyle.fromValue(pref[AVATAR_STYLE_KEY])
 
         val identity = Identity.fromSeed(seedHex.hexToBytes())
         service.initialize(identity, phy, emptySet(), desc)
         ensurePublicChannel()
     }
 
-    /** Auto-joins MeshCore's default Public channel on first run. */
+    /**
+     * Joins MeshCore's default Public channel exactly once, for a brand-new user. After this
+     * one-time seeding the user is free to leave Public and it won't be re-added.
+     */
     private suspend fun ensurePublicChannel() {
+        val ctx = getApplication<Application>()
+        if (ctx.dataStore.data.first()[PUBLIC_SEEDED_KEY] == true) return
+        ctx.dataStore.edit { it[PUBLIC_SEEDED_KEY] = true }
         val pskHex = ChannelCrypto.PUBLIC_PSK.toHex()
         if (dao.channelByPsk(pskHex) == null) {
             dao.upsertChannel(
@@ -284,6 +307,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     kind = ChannelKind.PUBLIC,
                 )
             )
+        }
+    }
+
+    fun setAvatarStyle(style: AvatarStyle) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[AVATAR_STYLE_KEY] = style.value }
+            _avatarStyle.value = style
         }
     }
 

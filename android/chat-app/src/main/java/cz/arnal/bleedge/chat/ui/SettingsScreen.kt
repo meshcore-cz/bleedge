@@ -52,6 +52,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     val seedHex by vm.seedHex.collectAsState()
     val description by vm.description.collectAsState()
     val phyMode by vm.phyMode.collectAsState()
+    val avatarStyle by vm.avatarStyle.collectAsState()
 
     val pubKeyHex = remember(seedHex) {
         runCatching { Identity.fromSeed(seedHex.hexToBytes()).publicKey.toHex() }.getOrDefault("")
@@ -138,6 +139,30 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                             onClick = { if (!vm.applySeed(seedDraft)) seedError = true },
                             enabled = seedDraft != seedHex,
                         ) { Text("Apply") }
+                    }
+                }
+            }
+
+            // Avatars
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Contact avatars", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "How contacts and channels are pictured when they have no custom photo.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = avatarStyle == cz.arnal.bleedge.chat.AvatarStyle.IDENTICON,
+                            onClick = { vm.setAvatarStyle(cz.arnal.bleedge.chat.AvatarStyle.IDENTICON) },
+                            label = { Text("Identicons") },
+                        )
+                        FilterChip(
+                            selected = avatarStyle == cz.arnal.bleedge.chat.AvatarStyle.INITIALS,
+                            onClick = { vm.setAvatarStyle(cz.arnal.bleedge.chat.AvatarStyle.INITIALS) },
+                            label = { Text("Initials") },
+                        )
                     }
                 }
             }

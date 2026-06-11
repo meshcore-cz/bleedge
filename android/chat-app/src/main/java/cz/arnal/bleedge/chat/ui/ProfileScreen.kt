@@ -1,5 +1,6 @@
 package cz.arnal.bleedge.chat.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -56,6 +57,14 @@ fun ProfileScreen(
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showShare by remember { mutableStateOf(false) }
+
+    // A MeshCore share URI other apps can scan to add this contact / join this channel.
+    val shareUri = when {
+        profile.isChannel && profile.pskHex.isNotBlank() -> MeshCoreUri.channel(profile.name, profile.pskHex)
+        !profile.isChannel && profile.pubKeyHex.isNotBlank() -> MeshCoreUri.contact(profile.name, profile.pubKeyHex)
+        else -> null
+    }
 
     Scaffold(
         topBar = {
@@ -123,17 +132,14 @@ fun ProfileScreen(
             }
 
             if (profile.isChannel) {
-                // The Public channel is the always-available default; don't offer to leave it.
-                if (profile.channelKind != ChannelKind.PUBLIC) {
+                Spacer(Modifier.size(8.dp))
+                OutlinedButton(
+                    onClick = { confirmDelete = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Logout, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    OutlinedButton(
-                        onClick = { confirmDelete = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(Icons.Default.Logout, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text("Leave channel")
-                    }
+                    Text("Leave channel")
                 }
             } else if (profile.isContact) {
                 Spacer(Modifier.size(8.dp))
@@ -148,13 +154,6 @@ fun ProfileScreen(
             }
 
             // Share QR — a MeshCore URI other apps can scan to add this contact/channel.
-            val shareUri = when {
-                profile.isChannel && profile.pskHex.isNotBlank() ->
-                    MeshCoreUri.channel(profile.name, profile.pskHex)
-                !profile.isChannel && profile.pubKeyHex.isNotBlank() ->
-                    MeshCoreUri.contact(profile.name, profile.pubKeyHex)
-                else -> null
-            }
             if (shareUri != null) {
                 Spacer(Modifier.size(28.dp))
                 Text(
@@ -163,9 +162,18 @@ fun ProfileScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.size(12.dp))
-                QrImage(shareUri, modifier = Modifier.size(240.dp))
+                QrImage(shareUri, modifier = Modifier.size(240.dp).clickable { showShare = true })
             }
         }
+    }
+
+    if (showShare && shareUri != null) {
+        ShareQrSheet(
+            title = if (profile.isChannel) "Share ${channelLabel(profile.name, profile.channelKind)}" else "Share ${profile.name}",
+            subtitle = if (profile.isChannel) "Scan to join this channel" else "Scan to add this contact",
+            uri = shareUri,
+            onDismiss = { showShare = false },
+        )
     }
 
     if (renaming) {
