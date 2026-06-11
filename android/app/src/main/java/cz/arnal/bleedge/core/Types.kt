@@ -2,8 +2,11 @@ package cz.arnal.bleedge.core
 
 import java.util.UUID
 
-// Protocol version (must match Go side)
-const val PROTOCOL_VERSION: Byte = 1
+// Protocol version (must match Go side). v2 = Ed25519 identities + signed ANNOUNCE.
+const val PROTOCOL_VERSION: Byte = 2
+
+// Ed25519 identity seed length (RFC 8032).
+const val SEED_SIZE = 32
 
 // NodeID is an 8-byte identifier for a mesh node.
 @JvmInline
@@ -42,6 +45,9 @@ value class NodeID(val bytes: ByteArray) {
             java.security.SecureRandom().nextBytes(bytes)
             return NodeID(bytes)
         }
+
+        /** Routing NodeID = first 8 bytes of an Ed25519 public key. */
+        fun fromPubKey(pub: ByteArray): NodeID = NodeID(pub.copyOfRange(0, 8))
     }
 }
 

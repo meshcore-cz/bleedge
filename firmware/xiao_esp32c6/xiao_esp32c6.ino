@@ -14,6 +14,7 @@
 // and 1M PHY (the default mesh PHY).
 
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 #include <esp_random.h>
 
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "mesh.h"
+#include "src/ed25519/ed25519.h"
 
 // ---- BLEEdge GATT UUIDs (must match core / Android / Go) ---------------------
 static const char* SERVICE_UUID   = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a001";
@@ -30,7 +32,7 @@ static const char* NODEINFO_UUID  = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a002";
 static const char* PACKETIN_UUID  = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a003";
 static const char* PACKETOUT_UUID = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a004";
 
-static const uint8_t  PROTOCOL_VERSION = 1;
+static const uint8_t  PROTOCOL_VERSION = mesh::PROTOCOL_VERSION;  // 2: Ed25519 + signed ANNOUNCE
 static const uint8_t  RELAY_CAPS = mesh::CAP_SENDER | mesh::CAP_RECEIVER | mesh::CAP_RELAY;
 // Conservative fragment size: a frame is FRAGMENT_MTU bytes, so each peer's ATT
 // MTU must be >= FRAGMENT_MTU + 3. 200 is safe for any peer negotiating >= 203.
@@ -38,7 +40,10 @@ static const size_t   FRAGMENT_MTU = 200;
 static const uint32_t ANNOUNCE_INTERVAL_MS = 15000;
 
 // ---- node state -------------------------------------------------------------
-static uint8_t g_nodeId[mesh::NODE_ID_LEN];
+static uint8_t g_nodeId[mesh::NODE_ID_LEN];      // = g_pubKey[:8]
+static uint8_t g_seed[32];                       // Ed25519 32-byte seed (persisted in NVS)
+static uint8_t g_pubKey[mesh::PUBKEY_LEN];       // Ed25519 public key (node identity)
+static uint8_t g_privKey[64];                    // orlp expanded private key
 
 static NimBLECharacteristic* g_packetOut = nullptr;
 static mesh::DedupCache  g_dedup;
@@ -55,11 +60,23 @@ static uint32_t g_lastAnnounceMs = 0;
 
 // ---- helpers ----------------------------------------------------------------
 
-static void deriveNodeId() {
-  uint64_t mac = ESP.getEfuseMac();  // 48-bit, stable per chip
-  g_nodeId[0] = 0xE5;                // "ESP" marker
-  g_nodeId[1] = 0xC6;                // C6 family
-  for (int i = 0; i < 6; i++) g_nodeId[2 + i] = (uint8_t)(mac >> (8 * i));
+// Loads the Ed25519 identity seed from NVS, or generates and persists a new one,
+// then derives the keypair. NodeID = pubkey[:8] (MeshCore-compatible identity).
+static void loadOrCreateIdentity() {
+  Preferences prefs;
+  prefs.begin("bleedge", false);
+  size_t n = prefs.getBytesLength("seed");
+  if (n == sizeof(g_seed)) {
+    prefs.getBytes("seed", g_seed, sizeof(g_seed));
+  } else {
+    esp_fill_random(g_seed, sizeof(g_seed));
+    prefs.putBytes("seed", g_seed, sizeof(g_seed));
+    Serial.println("[relay] generated new Ed25519 identity seed");
+  }
+  prefs.end();
+
+  ed25519_create_keypair(g_pubKey, g_privKey, g_seed);
+  memcpy(g_nodeId, g_pubKey, mesh::NODE_ID_LEN);
 }
 
 static String nodeIdHex() {
@@ -148,9 +165,18 @@ static void sendAnnounce() {
   }
   size_t nNeighbors = neighbors.size() / mesh::NODE_ID_LEN;
 
+  uint32_t seq = ++g_announceSeq;
+  uint32_t ts = millis() / 1000;
+
+  // Sign the canonical announce message with our Ed25519 identity.
+  std::vector<uint8_t> signedMsg;
+  mesh::announceSignedMessage(g_pubKey, ts, RELAY_CAPS, seq, neighbors.data(), nNeighbors, signedMsg);
+  uint8_t sig[mesh::SIG_LEN];
+  ed25519_sign(sig, signedMsg.data(), signedMsg.size(), g_pubKey, g_privKey);
+
   std::vector<uint8_t> pkt;
-  mesh::buildAnnounce(g_nodeId, RELAY_CAPS, ++g_announceSeq, millis() / 1000, pid,
-                      neighbors.data(), nNeighbors, pkt);
+  mesh::buildAnnounce(g_nodeId, RELAY_CAPS, seq, ts, pid,
+                      neighbors.data(), nNeighbors, g_pubKey, sig, pkt);
 
   // Mark our own packet so a flood echo isn't re-flooded back out.
   g_dedup.seenOrAdd(pid);
@@ -199,7 +225,7 @@ class PacketInCallbacks : public NimBLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  deriveNodeId();
+  loadOrCreateIdentity();
   Serial.printf("\nBLEEdge relay  node=%s  phy=1m\n", nodeIdHex().c_str());
 
   NimBLEDevice::init("BLEEdge");
@@ -211,11 +237,11 @@ void setup() {
 
   NimBLEService* svc = server->createService(SERVICE_UUID);
 
-  // NODE_INFO (read): version(1) + nodeId(8) + caps(1)
-  uint8_t nodeInfo[10];
+  // NODE_INFO (read): version(1) + pubkey(32) + caps(1) = 34 bytes
+  uint8_t nodeInfo[34];
   nodeInfo[0] = PROTOCOL_VERSION;
-  memcpy(nodeInfo + 1, g_nodeId, mesh::NODE_ID_LEN);
-  nodeInfo[9] = RELAY_CAPS;
+  memcpy(nodeInfo + 1, g_pubKey, mesh::PUBKEY_LEN);
+  nodeInfo[33] = RELAY_CAPS;
   NimBLECharacteristic* ni = svc->createCharacteristic(NODEINFO_UUID, NIMBLE_PROPERTY::READ);
   ni->setValue(nodeInfo, sizeof(nodeInfo));
 

@@ -12,6 +12,9 @@ namespace mesh {
 constexpr size_t NODE_ID_LEN   = 8;
 constexpr size_t PACKET_ID_LEN = 16;
 constexpr size_t FRAME_HEADER  = 23;  // version(1)+id(16)+fragIdx(1)+fragCount(1)+crc32(4)
+constexpr size_t PUBKEY_LEN    = 32;  // Ed25519 public key
+constexpr size_t SIG_LEN       = 64;  // Ed25519 signature
+constexpr uint8_t PROTOCOL_VERSION = 2;  // v2 = Ed25519 identities + signed ANNOUNCE
 
 // CBOR packet map keys (see core/packet.go).
 enum : uint8_t {
@@ -99,12 +102,24 @@ PacketHeader parseHeader(const uint8_t* pkt, size_t len, const uint8_t selfId[NO
 bool buildForward(const uint8_t* pkt, size_t len, const uint8_t selfId[NODE_ID_LEN],
                   uint8_t newTtl, std::vector<uint8_t>& out);
 
-// Builds a complete ANNOUNCE packet (CBOR) this node originates. `packetId` is the
+// Builds the canonical byte string that an ANNOUNCE signature covers. Fixed
+// explicit layout (must match core.AnnounceSignedMessage in Go and the Kotlin
+// port): pubkey[32] | timestamp[4 LE] | caps[1] | seq[4 LE] | count[1] |
+// neighbors[count*8]. No crypto here — the caller signs the result.
+void announceSignedMessage(const uint8_t pubKey[PUBKEY_LEN], uint32_t timestamp,
+                           uint8_t caps, uint32_t seq,
+                           const uint8_t* neighbors, size_t neighborCount,
+                           std::vector<uint8_t>& out);
+
+// Builds a complete signed ANNOUNCE packet (CBOR) this node originates. `selfId`
+// must equal pubKey[:8]. `signature` is the Ed25519 signature over
+// announceSignedMessage(...), produced by the caller. `packetId` is the
 // caller-generated 16-byte ID (also used for fragmentation and dedup marking).
-// `neighbors` is a contiguous array of `neighborCount` 8-byte NodeIDs to advertise.
+// `neighbors` is a contiguous array of `neighborCount` 8-byte NodeIDs.
 void buildAnnounce(const uint8_t selfId[NODE_ID_LEN], uint8_t caps, uint32_t seq,
                    int64_t unixSeconds, const uint8_t packetId[PACKET_ID_LEN],
                    const uint8_t* neighbors, size_t neighborCount,
+                   const uint8_t pubKey[PUBKEY_LEN], const uint8_t signature[SIG_LEN],
                    std::vector<uint8_t>& out);
 
 // Splits packet bytes into GATT frames (matches core.FragmentPacket).

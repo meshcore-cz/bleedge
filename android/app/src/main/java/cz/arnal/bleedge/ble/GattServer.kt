@@ -28,7 +28,7 @@ private const val TAG = "BLEEdgeGattServer"
  */
 class BLEEdgeGattServer(
     private val context: Context,
-    private val nodeId: NodeID,
+    private val pubKey: ByteArray, // 32-byte Ed25519 public key (NodeID = pubKey[:8])
     private val caps: Capabilities,
     private val onFrameReceived: (ByteArray, BluetoothDevice) -> Unit,
     private val onDeviceConnected: ((BluetoothDevice) -> Unit)? = null,
@@ -80,7 +80,7 @@ class BLEEdgeGattServer(
         val server = bm.openGattServer(context, serverCallback)
         gattServer = server
         val added = server.addService(service)
-        Log.i(TAG, "GATT server started node=${nodeId.toHexString()} addServiceQueued=$added")
+        Log.i(TAG, "GATT server started node=${NodeID.fromPubKey(pubKey).toHexString()} addServiceQueued=$added")
         onLog?.invoke("GATT server open, addService queued=$added")
     }
 
@@ -116,11 +116,11 @@ class BLEEdgeGattServer(
     }
 
     private fun nodeInfoValue(): ByteArray {
-        // version(1) + nodeId(8) + caps(1) = 10 bytes
-        val b = ByteArray(10)
+        // version(1) + pubkey(32) + caps(1) = 34 bytes
+        val b = ByteArray(34)
         b[0] = PROTOCOL_VERSION
-        nodeId.bytes.copyInto(b, 1)
-        b[9] = caps.value.toByte()
+        pubKey.copyInto(b, 1)
+        b[33] = caps.value.toByte()
         return b
     }
 

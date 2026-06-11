@@ -111,6 +111,8 @@ data class AnnouncePayload(
     val neighbors: List<NodeID>,
     val seq: Int,
     val timestamp: Long,
+    val publicKey: ByteArray = ByteArray(0), // 32 bytes (Ed25519), key 6
+    val signature: ByteArray = ByteArray(0), // 64 bytes (Ed25519), key 7
 ) {
     fun encode(): ByteArray {
         val map = CBORObject.NewOrderedMap()
@@ -121,6 +123,8 @@ data class AnnouncePayload(
         map[CBORObject.FromObject(3)] = nbArr
         map[CBORObject.FromObject(4)] = CBORObject.FromObject(seq)
         map[CBORObject.FromObject(5)] = CBORObject.FromObject(timestamp)
+        map[CBORObject.FromObject(6)] = CBORObject.FromObject(publicKey)
+        map[CBORObject.FromObject(7)] = CBORObject.FromObject(signature)
         return map.EncodeToBytes()
     }
 
@@ -133,7 +137,9 @@ data class AnnouncePayload(
             val neighbors = cborArrayToNodeIDs(nbObj)
             val seq = map[CBORObject.FromObject(4)].AsInt32()
             val timestamp = map[CBORObject.FromObject(5)].AsInt64()
-            return AnnouncePayload(nodeId, caps, neighbors, seq, timestamp)
+            val pub = map[CBORObject.FromObject(6)]?.takeIf { !it.isNull }?.GetByteString() ?: ByteArray(0)
+            val sig = map[CBORObject.FromObject(7)]?.takeIf { !it.isNull }?.GetByteString() ?: ByteArray(0)
+            return AnnouncePayload(nodeId, caps, neighbors, seq, timestamp, pub, sig)
         }
     }
 }

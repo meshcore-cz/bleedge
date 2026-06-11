@@ -13,8 +13,10 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import cz.arnal.bleedge.core.Identity
 import cz.arnal.bleedge.core.NodeID
 import cz.arnal.bleedge.core.PHYMode
+import cz.arnal.bleedge.core.SEED_SIZE
 import cz.arnal.bleedge.service.BLEEdgeService
 import cz.arnal.bleedge.service.LogEntry
 import cz.arnal.bleedge.service.NeighborEntry
@@ -33,7 +35,7 @@ import kotlinx.coroutines.launch
 import java.security.SecureRandom
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "bleedge_prefs")
-private val NODE_ID_KEY = stringPreferencesKey("node_id")
+private val SEED_KEY = stringPreferencesKey("seed")
 private val PHY_MODE_KEY = stringPreferencesKey("phy_mode")
 private val ALLOWLIST_KEY = stringPreferencesKey("allowlist")
 
@@ -136,10 +138,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Use first() to read once — avoids re-entrancy issues with collect + edit.
         val pref = ctx.dataStore.data.first()
 
-        val nodeIdHex = pref[NODE_ID_KEY] ?: run {
-            val newId = generateNodeId()
-            ctx.dataStore.edit { it[NODE_ID_KEY] = newId }
-            newId
+        // Ed25519 identity seed (32 bytes). NodeID is derived as pubkey[:8].
+        val seedHex = pref[SEED_KEY] ?: run {
+            val newSeed = generateSeedHex()
+            ctx.dataStore.edit { it[SEED_KEY] = newSeed }
+            newSeed
         }
         // Default to 1M: Coded PHY (Long Range) is an opt-in extension because many
         // devices advertise on Coded PHY but cannot scan it (despite reporting support).
@@ -150,10 +153,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         _allowlist.value = allowlistSet
 
-        val nodeId = NodeID.fromHex(nodeIdHex)
+        val seed = ByteArray(SEED_SIZE) { i -> seedHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        val identity = Identity.fromSeed(seed)
         val phyMode = PHYMode.fromString(phyModeStr)
 
-        service.initialize(nodeId, phyMode, allowlistSet)
+        service.initialize(identity, phyMode, allowlistSet)
     }
 
     fun sendMessage(destination: String, message: String, ttl: Int) {
@@ -219,8 +223,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun generateNodeId(): String {
-        val bytes = ByteArray(8)
+    private fun generateSeedHex(): String {
+        val bytes = ByteArray(SEED_SIZE)
         SecureRandom().nextBytes(bytes)
         return bytes.joinToString("") { "%02x".format(it) }
     }

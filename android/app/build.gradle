@@ -43,5 +43,10 @@ dependencies {
     implementation "androidx.compose.material3:material3"
     implementation "com.upokecenter:cbor:4.5.4"
     implementation "androidx.datastore:datastore-preferences:1.1.1"
+    // Ed25519 (RFC 8032) for MeshCore-compatible identities + signed ANNOUNCE.
+    // Uses BouncyCastle's low-level rfc8032.Ed25519 (no JCE provider registration,
+    // so no conflict with Android's bundled BC). Works on API 26+.
+    implementation "org.bouncycastle:bcprov-jdk18on:1.78.1"
     debugImplementation "androidx.compose.ui:ui-tooling"
+    testImplementation "junit:junit:4.13.2"
 }

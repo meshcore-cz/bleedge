@@ -9,7 +9,12 @@ bin="$(mktemp -t bleedge_host_test.XXXXXX)"
 trap 'rm -f "$bin"' EXIT
 
 echo "==> compiling host_test"
-c++ -std=c++17 -I"$here" -I"$here/.." "$here/host_test.cpp" "$here/../mesh.cpp" -o "$bin"
+ed="$here/../src/ed25519"
+c++ -std=c++17 -I"$here" -I"$here/.." -I"$ed" \
+  "$here/host_test.cpp" "$here/../mesh.cpp" \
+  "$ed/fe.c" "$ed/ge.c" "$ed/sc.c" "$ed/sha512.c" \
+  "$ed/keypair.c" "$ed/sign.c" "$ed/verify.c" \
+  -o "$bin"
 
 echo "==> running cross-check against Go reference"
 cd "$repo"

@@ -1,6 +1,9 @@
 # BLEEdge Protocol Specification
 
-**Protocol version: 1**
+**Protocol version: 2**
+
+> v2 (current) adds Ed25519 node identities and signed ANNOUNCE. It is
+> intentionally incompatible with v1 (the router drops version mismatches).
 
 This document is the single source of truth for the on-the-wire behavior of the
 BLEEdge BLE Coded-PHY mesh transport. Every implementation must conform to it:
@@ -25,10 +28,22 @@ ESP32 `mesh.cpp` and Android Kotlin port are cross-checked against `core/`
 
 ## 1. Identity
 
-- **NodeID** = 8 random bytes, generated once per node. **Not** the BLE MAC
-  address (which rotates). Rendered as lowercase hex.
+A node identity is an **Ed25519 keypair** (RFC 8032), MeshCore-compatible:
+
+- A node stores a random **32-byte seed**; the keypair is derived from it
+  (`ed25519` public key = 32 bytes). The same seed yields the same keypair under
+  any RFC 8032 implementation — Go stdlib, BouncyCastle (Android), orlp/ed25519
+  (ESP32) — so identities and signatures interoperate. The seed is persisted
+  (`~/.bleedge/seed` on Go nodes; NVS on the ESP32) and must never be shared.
+- The **32-byte public key** is the canonical identity. It is carried in
+  `NODE_INFO` and in every ANNOUNCE, and is what signatures verify against.
+- **NodeID** (the 8-byte routing address used in packet headers) = the **first 8
+  bytes of the public key**. This keeps packet headers and advertising compact
+  (MeshCore likewise routes on a pubkey prefix). Rendered as lowercase hex.
 - NodeID ordering (`Less`) is a plain big-endian lexicographic byte compare.
 - The all-zero NodeID is reserved and means **broadcast** as a packet destination.
+
+> Reference: `core.Identity`, `core.NodeIDFromPubKey`, `core.LoadOrCreateIdentity`.
 
 ---
 
@@ -47,18 +62,21 @@ ESP32 `mesh.cpp` and Android Kotlin port are cross-checked against `core/`
 - The server **notifies** on `PACKET_OUT` to push a GATT frame to the client.
 - Both directions carry the same [frame format](#3-gatt-frame-format).
 
-**`NODE_INFO`** is a 10-byte read value identifying the peer without parsing an
-ANNOUNCE:
+**`NODE_INFO`** is a 34-byte read value identifying the peer without parsing an
+ANNOUNCE. The reader derives `NodeID = pubkey[:8]`:
 
 ```
-version(1) | nodeID(8) | caps(1)
+version(1) | pubkey(32) | caps(1)
 ```
 
 ### 2.2 Advertising & discovery
 
 - NodeID is advertised in **manufacturer-specific data** with company ID
-  `0xBEED`, payload = the raw 8-byte NodeID, in the **primary** advertising PDU.
-  Peers learn each other's NodeID from the scan result without connecting.
+  `0xBEED`, payload = the raw 8-byte NodeID (= pubkey prefix), in the **primary**
+  advertising PDU. Peers learn each other's NodeID from the scan result without
+  connecting; the full 32-byte public key is learned later via `NODE_INFO` or
+  ANNOUNCE. (The full key does not fit a legacy advert alongside the service
+  UUID, which is why only the 8-byte prefix is advertised.)
 - The BLEEdge service UUID is also advertised.
 - A scanner accepts a device that has **either** the `0xBEED` manufacturer data
   **or** the BLEEdge service UUID. macOS/CoreBluetooth peripherals cannot
@@ -176,11 +194,33 @@ When `type == 2`, `payload` (key 12) is itself a CBOR map:
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 1 | `node_id` | 8 bytes |
+| 1 | `node_id` | 8 bytes (= `public_key[:8]`) |
 | 2 | `caps` | uint8 (capability bitmask) |
 | 3 | `neighbors` | array of 8-byte NodeID |
 | 4 | `seq` | uint32 |
 | 5 | `timestamp` | int64 (unix seconds) |
+| 6 | `public_key` | 32 bytes (Ed25519) |
+| 7 | `signature` | 64 bytes (Ed25519) |
+
+**Signed message.** `signature` is an Ed25519 signature, by the node's identity
+key, over a **fixed explicit byte layout** (not the CBOR — CBOR is not byte-stable
+across libraries). Every implementation builds it identically
+(`core.AnnounceSignedMessage` / `mesh::announceSignedMessage`):
+
+```
+public_key      [32]
+timestamp       [4]  uint32 little-endian (unix seconds, low 32 bits)
+caps            [1]
+seq             [4]  uint32 little-endian
+neighbor_count  [1]
+neighbors       [neighbor_count * 8]   each NodeID, in ANNOUNCE order
+```
+
+A receiver **must**, before trusting an ANNOUNCE: check `public_key` is 32 bytes,
+check `node_id == public_key[:8]` and `packet.source == public_key[:8]`, then
+verify the signature. Any failure → drop as `bad-signature` and **do not relay**.
+(The ESP32 flood-only relay forwards opaque packets without verifying; verifying
+endpoints reject forgeries.)
 
 ### 4.2 Capabilities bitmask
 
@@ -209,10 +249,12 @@ given an incoming packet and the peer it arrived from, it returns a list of
 
 ### 5.1 Common checks (every packet)
 
-1. **Version**: `version != 1` → drop (`invalid-version`).
+1. **Version**: `version != 2` → drop (`invalid-version`).
 2. **Allowlist** (optional): if a non-empty allowlist is configured and the
    incoming peer is not in it → drop (`peer-not-allowed`).
-3. ANNOUNCE (`type==2`) updates local [topology](#54-topology) then is flooded.
+3. ANNOUNCE (`type==2`): **verify the signature and NodeID/pubkey binding**
+   (section 4.1) → drop `bad-signature` on failure; otherwise update local
+   [topology](#54-topology) then flood.
 
 ### 5.2 FLOOD mode (`mode == 1`)
 
@@ -278,16 +320,23 @@ ACKs are generated automatically for **unicast DATA** that is delivered locally:
 
 A new or modified implementation must:
 
-- [ ] Generate an 8-byte random NodeID; advertise it under company ID `0xBEED`.
-- [ ] Expose the GATT service + 3 characteristics with the exact UUIDs above.
+- [ ] Derive an Ed25519 identity from a persisted 32-byte seed; `NodeID =
+      pubkey[:8]`; advertise the 8-byte NodeID under company ID `0xBEED`.
+- [ ] Expose the GATT service + 3 characteristics with the exact UUIDs above;
+      serve `NODE_INFO` as `version|pubkey(32)|caps` = 34 bytes.
 - [ ] Encode/decode the 23-byte big-endian frame header; CRC-32/IEEE over the
       full packet; fragment at `MAX_FRAME_SIZE = 200` (177 data bytes/frame).
-- [ ] CBOR-encode packets with **integer** keys 1–13 exactly as in section 4.
-- [ ] Drop on version mismatch, duplicate `id`, loop (self in trace), TTL 0.
+- [ ] CBOR-encode packets with **integer** keys 1–13 exactly as in section 4;
+      ANNOUNCE payload keys 1–7 including `public_key`(6) + `signature`(7).
+- [ ] Sign ANNOUNCE over the exact byte layout in section 4.1; on receive, verify
+      the signature + `node_id==pubkey[:8]` and drop `bad-signature` on failure.
+- [ ] Drop on version mismatch (`!= 2`), duplicate `id`, loop (self in trace), TTL 0.
 - [ ] Append self to `trace` and decrement TTL on every relay.
 - [ ] Exclude the inbound peer when re-flooding; apply 10–100 ms jitter.
 - [ ] Emit ANNOUNCE every 15 s with TTL 3 and the correct caps bitmask.
 - [ ] Honor dedup (4096 / 5 min), neighbor (60 s), topology (90 s) lifetimes.
+- [ ] Reproduce the cross-platform Ed25519 test vector (seed `0001…1f`):
+      pubkey `03a107bf…125531b8`, and a signature that Go/firmware both verify.
 
 When changing the wire format, bump `ProtocolVersion`, update this doc in the
 same change, and update `firmware/xiao_esp32c6/test/` cross-checks.

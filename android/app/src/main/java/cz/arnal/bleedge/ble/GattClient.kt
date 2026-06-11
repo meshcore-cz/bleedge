@@ -234,11 +234,11 @@ class BLEEdgeGattClient(
         }
 
         private fun handleNodeInfo(gatt: BluetoothGatt, data: ByteArray) {
-            if (data.size < 10) return
+            if (data.size < 34) return
             if (intentionalDisconnect) { gatt.disconnect(); return }
-            // version(1) + nodeId(8) + caps(1)
-            val nodeId = NodeID(data.copyOfRange(1, 9))
-            val caps = Capabilities(data[9].toInt() and 0xFF)
+            // version(1) + pubkey(32) + caps(1) = 34 bytes; NodeID = pubkey[:8]
+            val nodeId = NodeID.fromPubKey(data.copyOfRange(1, 33))
+            val caps = Capabilities(data[33].toInt() and 0xFF)
             peerNodeId = nodeId
             peerCaps = caps
             Log.i(TAG, "NODE_INFO peer=${nodeId.toHexString()} caps=$caps")

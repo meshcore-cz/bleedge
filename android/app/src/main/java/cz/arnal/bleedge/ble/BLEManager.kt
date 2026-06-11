@@ -46,14 +46,14 @@ class BLEManager(
     }
 
     fun createGattServer(
-        nodeId: NodeID,
+        pubKey: ByteArray,
         caps: cz.arnal.bleedge.core.Capabilities,
         onFrameReceived: (ByteArray, android.bluetooth.BluetoothDevice) -> Unit,
         onDeviceConnected: ((android.bluetooth.BluetoothDevice) -> Unit)? = null,
         onDeviceDisconnected: ((android.bluetooth.BluetoothDevice) -> Unit)? = null,
         onLog: ((String) -> Unit)? = null,
     ): BLEEdgeGattServer {
-        return BLEEdgeGattServer(context, nodeId, caps, onFrameReceived,
+        return BLEEdgeGattServer(context, pubKey, caps, onFrameReceived,
             onDeviceConnected, onDeviceDisconnected, onLog).also { gattServer = it }
     }
 

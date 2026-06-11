@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "mesh.h"
+#include "ed25519.h"
 
 static std::vector<uint8_t> fromHex(const char* s) {
   std::vector<uint8_t> out;
@@ -55,8 +56,10 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (std::string(argv[1]) == "--announce") {
-    // --announce <selfhex> <caps> <seq> [neighborhex ...]
-    std::vector<uint8_t> self = fromHex(argv[2]);
+    // --announce <seedhex> <caps> <seq> [neighborhex ...]
+    // Derives the Ed25519 keypair from the 32-byte seed, signs, and builds a v2
+    // signed ANNOUNCE. NodeID = pubkey[:8]. Timestamp is fixed at 1700000000.
+    std::vector<uint8_t> seed = fromHex(argv[2]);
     uint8_t caps = (uint8_t)atoi(argv[3]);
     uint32_t seq = (uint32_t)atol(argv[4]);
     std::vector<uint8_t> neighbors;
@@ -64,10 +67,19 @@ int main(int argc, char** argv) {
       std::vector<uint8_t> nb = fromHex(argv[i]);
       neighbors.insert(neighbors.end(), nb.begin(), nb.end());
     }
+    uint8_t pub[32], priv[64];
+    ed25519_create_keypair(pub, priv, seed.data());
+    size_t nCount = neighbors.size() / mesh::NODE_ID_LEN;
+
+    std::vector<uint8_t> msg;
+    mesh::announceSignedMessage(pub, 1700000000u, caps, seq, neighbors.data(), nCount, msg);
+    uint8_t sig[64];
+    ed25519_sign(sig, msg.data(), msg.size(), pub, priv);
+
     uint8_t pid[mesh::PACKET_ID_LEN] = {0};
     std::vector<uint8_t> out;
-    mesh::buildAnnounce(self.data(), caps, seq, 1700000000, pid,
-                        neighbors.data(), neighbors.size() / mesh::NODE_ID_LEN, out);
+    mesh::buildAnnounce(pub /* selfId = pubkey[:8] */, caps, seq, 1700000000, pid,
+                        neighbors.data(), nCount, pub, sig, out);
     printHex(out);
     return 0;
   }

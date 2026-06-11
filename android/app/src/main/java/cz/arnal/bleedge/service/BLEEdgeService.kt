@@ -23,6 +23,7 @@ import cz.arnal.bleedge.core.AnnouncePayload
 import cz.arnal.bleedge.core.ANDROID_CAPABILITIES
 import cz.arnal.bleedge.core.Capabilities
 import cz.arnal.bleedge.core.Frame
+import cz.arnal.bleedge.core.Identity
 import cz.arnal.bleedge.core.NodeID
 import cz.arnal.bleedge.core.isBroadcast
 import cz.arnal.bleedge.core.Packet
@@ -119,6 +120,9 @@ class BLEEdgeService : Service() {
     private var bleAdvertiser: BLEEdgeAdvertiser? = null
     private var bleScanner: BLEEdgeScanner? = null
 
+    // Local Ed25519 identity (set in initialize); NodeID = identity.nodeId.
+    private var identity: Identity? = null
+
     // StateFlows consumed by the UI
     private val _nodeId = MutableStateFlow(NodeID(ByteArray(8)))
     val nodeId: StateFlow<NodeID> = _nodeId.asStateFlow()
@@ -181,7 +185,9 @@ class BLEEdgeService : Service() {
     }
 
     /** Initialize the BLE node with the given config. Call once after binding. */
-    fun initialize(nodeId: NodeID, requestedPhyMode: PHYMode, allowlist: Set<String>) {
+    fun initialize(identity: Identity, requestedPhyMode: PHYMode, allowlist: Set<String>) {
+        this.identity = identity
+        val nodeId = identity.nodeId
         // Reset all runtime state so the UI starts clean every time the service initialises.
         peers.clear()
         serverPeers.clear()
@@ -195,7 +201,7 @@ class BLEEdgeService : Service() {
         _nodeId.value = nodeId
         this.allowlist = allowlist.toMutableSet()
 
-        router = Router(nodeId)
+        router = Router(identity)
         router.allowlist.addAll(allowlist)
         reassembler = Reassembler(scope)
 
@@ -224,7 +230,7 @@ class BLEEdgeService : Service() {
 
         val caps = ANDROID_CAPABILITIES
         val gattServer = bleManager.createGattServer(
-            nodeId = nodeId,
+            pubKey = identity.publicKey,
             caps = caps,
             onFrameReceived = { frame, device -> handleIncomingFrame(frame, device) },
             onDeviceConnected = { device ->
@@ -592,7 +598,8 @@ class BLEEdgeService : Service() {
 
     fun clearData() {
         // Recreate the router to wipe dedup cache, neighbor table, and topology.
-        router = Router(_nodeId.value)
+        val id = identity ?: return
+        router = Router(id)
         router.allowlist.addAll(allowlist)
         // Clear all displayed state.
         _receivedMessages.value = emptyList()

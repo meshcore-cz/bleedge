@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
@@ -131,22 +132,33 @@ func main() {
 	}
 	check("frames byte-identical", allEq)
 
-	// ---- ANNOUNCE with neighbors decodes correctly in Go ------------------
-	selfA := core.NodeID{0xE5, 0xC6, 1, 2, 3, 4, 5, 6}
-	n1 := core.NodeID{0, 0, 0, 0, 0, 0, 0, 0xAA}
-	n2 := core.NodeID{0xDE, 0, 0, 0, 0, 0, 0, 0x01}
-	annOut, _ := exec.Command(bin, "--announce", hex.EncodeToString(selfA[:]), "7", "42",
+	// ---- signed ANNOUNCE: firmware derives keypair + signs, Go verifies -------
+	// This is the load-bearing proof that orlp/ed25519 (C) and crypto/ed25519
+	// (Go) agree on the public key and signature for the same seed + message.
+	var seed [core.SeedSize]byte
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	goID := core.IdentityFromSeed(seed)
+	caps := core.Capabilities(core.CapReceiver | core.CapRelay | core.CapCodedPHY) // 0x16
+	n1 := core.NodeID{0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa}
+	n2 := core.NodeID{0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb}
+	annOut, _ := exec.Command(bin, "--announce", hex.EncodeToString(seed[:]),
+		fmt.Sprint(uint8(caps)), "7",
 		hex.EncodeToString(n1[:]), hex.EncodeToString(n2[:])).Output()
 	annBytes, _ := hex.DecodeString(strings.TrimSpace(string(annOut)))
 	annPkt, errAnn := core.DecodePacket(annBytes)
 	check("announce packet decodes", errAnn == nil)
-	check("announce is ANNOUNCE type, flood, ttl=3", annPkt.Type == core.PacketTypeAnnounce &&
-		annPkt.Mode == core.RoutingModeFlood && annPkt.TTL == 3 && annPkt.Source == selfA)
+	check("announce is ANNOUNCE type, flood, ttl=3, v2", annPkt.Type == core.PacketTypeAnnounce &&
+		annPkt.Mode == core.RoutingModeFlood && annPkt.TTL == 3 && annPkt.Version == core.ProtocolVersion)
 	payload, errPL := core.DecodeAnnounce(annPkt.Payload)
 	check("announce payload decodes", errPL == nil)
-	check("announce nodeId/caps/seq", payload.NodeID == selfA && payload.Caps == 7 && payload.Seq == 42)
-	check("announce neighbors=[n1,n2]", len(payload.Neighbors) == 2 &&
-		payload.Neighbors[0] == n1 && payload.Neighbors[1] == n2)
+	check("fw pubkey == go pubkey (orlp == stdlib)", bytes.Equal(payload.PublicKey, goID.Pub))
+	check("nodeId == pubkey[:8]", payload.NodeID == goID.NodeID() && annPkt.Source == goID.NodeID())
+	check("announce caps/seq/neighbors", payload.Caps == caps && payload.Seq == 7 &&
+		len(payload.Neighbors) == 2 && payload.Neighbors[0] == n1 && payload.Neighbors[1] == n2)
+	check("fw signature verifies in Go", core.VerifyAnnounce(payload.PublicKey, payload.Signature,
+		uint32(payload.Timestamp), payload.Caps, payload.Seq, payload.Neighbors))
 
 	if fail {
 		os.Exit(1)

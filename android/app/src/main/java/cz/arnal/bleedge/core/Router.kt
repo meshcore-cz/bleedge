@@ -25,13 +25,15 @@ object DropReason {
     const val MALFORMED       = "malformed"
     const val NOT_NEXT_HOP    = "not-next-hop"
     const val PEER_NOT_ALLOWED = "peer-not-allowed"
+    const val BAD_SIGNATURE   = "bad-signature"
 }
 
 /**
  * Pure routing engine with no BLE dependencies.
  * Mirrors core/router.go exactly.
  */
-class Router(val localId: NodeID) {
+class Router(val identity: Identity) {
+    val localId: NodeID = identity.nodeId
     val neighbors = NeighborTable()
     val topology = Topology()
     val allowlist = mutableSetOf<String>() // hex NodeID strings; empty = allow all
@@ -67,6 +69,17 @@ class Router(val localId: NodeID) {
     private fun handleAnnounce(pkt: Packet, incomingPeer: NodeID?): List<Action> {
         val ap = runCatching { AnnouncePayload.decode(pkt.payload) }.getOrElse {
             return listOf(Action(ActionType.DROP, DropReason.MALFORMED, pkt))
+        }
+        // Authenticate: NodeID must be bound to the carried public key, and the
+        // signature must verify. Reject (and do not relay) on any failure.
+        // (NodeID compares by hex — its ByteArray.equals is referential.)
+        val derivedHex = if (ap.publicKey.size == 32) NodeID.fromPubKey(ap.publicKey).toHexString() else ""
+        if (ap.publicKey.size != 32 ||
+            derivedHex != ap.nodeId.toHexString() ||
+            derivedHex != pkt.source.toHexString() ||
+            !Identity.verifyAnnounce(ap.publicKey, ap.signature, ap.timestamp.toInt(), ap.caps, ap.seq, ap.neighbors)
+        ) {
+            return listOf(Action(ActionType.DROP, DropReason.BAD_SIGNATURE, pkt))
         }
         topology.update(
             TopoNode(
@@ -195,12 +208,16 @@ class Router(val localId: NodeID) {
     /** Builds a periodic ANNOUNCE packet for this node. */
     fun buildAnnounce(caps: Capabilities, seq: Int): Packet {
         val neighborIds = neighbors.ids()
+        val ts = System.currentTimeMillis() / 1000
+        val sig = identity.signAnnounce(ts.toInt(), caps, seq, neighborIds)
         val ap = AnnouncePayload(
             nodeId = localId,
             caps = caps,
             neighbors = neighborIds,
             seq = seq,
-            timestamp = System.currentTimeMillis() / 1000,
+            timestamp = ts,
+            publicKey = identity.publicKey,
+            signature = sig,
         )
         return Packet(
             version = PROTOCOL_VERSION,

@@ -297,13 +297,34 @@ bool buildForward(const uint8_t* pkt, size_t len, const uint8_t selfId[NODE_ID_L
   return true;
 }
 
+void announceSignedMessage(const uint8_t pubKey[PUBKEY_LEN], uint32_t timestamp,
+                           uint8_t caps, uint32_t seq,
+                           const uint8_t* neighbors, size_t neighborCount,
+                           std::vector<uint8_t>& out) {
+  out.clear();
+  out.insert(out.end(), pubKey, pubKey + PUBKEY_LEN);
+  out.push_back(timestamp & 0xff);
+  out.push_back((timestamp >> 8) & 0xff);
+  out.push_back((timestamp >> 16) & 0xff);
+  out.push_back((timestamp >> 24) & 0xff);
+  out.push_back(caps);
+  out.push_back(seq & 0xff);
+  out.push_back((seq >> 8) & 0xff);
+  out.push_back((seq >> 16) & 0xff);
+  out.push_back((seq >> 24) & 0xff);
+  out.push_back((uint8_t)neighborCount);
+  out.insert(out.end(), neighbors, neighbors + neighborCount * NODE_ID_LEN);
+}
+
 void buildAnnounce(const uint8_t selfId[NODE_ID_LEN], uint8_t caps, uint32_t seq,
                    int64_t unixSeconds, const uint8_t packetId[PACKET_ID_LEN],
                    const uint8_t* neighbors, size_t neighborCount,
+                   const uint8_t pubKey[PUBKEY_LEN], const uint8_t signature[SIG_LEN],
                    std::vector<uint8_t>& out) {
-  // AnnouncePayload map(5): 1:nodeId 2:caps 3:neighbors 4:seq 5:timestamp
+  // AnnouncePayload map(7): 1:nodeId 2:caps 3:neighbors 4:seq 5:timestamp
+  //                         6:pubkey 7:signature
   std::vector<uint8_t> ap;
-  ap.push_back(0xa0 | 5);
+  ap.push_back(0xa0 | 7);
   ap.push_back(1); emitBstr(ap, selfId, NODE_ID_LEN);
   ap.push_back(2); emitUint(ap, caps);
   ap.push_back(3);                                 // neighbors array
@@ -316,12 +337,14 @@ void buildAnnounce(const uint8_t selfId[NODE_ID_LEN], uint8_t caps, uint32_t seq
   for (size_t i = 0; i < neighborCount; i++) emitBstr(ap, neighbors + i * NODE_ID_LEN, NODE_ID_LEN);
   ap.push_back(4); emitUint(ap, seq);
   ap.push_back(5); emitUint(ap, (uint64_t)unixSeconds);
+  ap.push_back(6); emitBstr(ap, pubKey, PUBKEY_LEN);
+  ap.push_back(7); emitBstr(ap, signature, SIG_LEN);
 
   // Packet map(12): mirrors a fresh flood packet with empty route/trace.
   uint8_t zero[NODE_ID_LEN] = {0};
   out.clear();
   out.push_back(0xa0 | 12);
-  out.push_back(KEY_VERSION);      emitUint(out, 1);
+  out.push_back(KEY_VERSION);      emitUint(out, PROTOCOL_VERSION);
   out.push_back(KEY_TYPE);         emitUint(out, TYPE_ANNOUNCE);
   out.push_back(KEY_ID);           emitBstr(out, packetId, PACKET_ID_LEN);
   out.push_back(KEY_SOURCE);       emitBstr(out, selfId, NODE_ID_LEN);
