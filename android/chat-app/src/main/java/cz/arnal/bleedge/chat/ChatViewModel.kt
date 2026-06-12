@@ -22,10 +22,12 @@ import cz.arnal.bleedge.chat.data.DiscoveredContact
 import cz.arnal.bleedge.chat.data.DiscoverySource
 import cz.arnal.bleedge.chat.data.Message
 import cz.arnal.bleedge.chat.data.MsgStatus
+import cz.arnal.bleedge.chat.data.Reaction
 import cz.arnal.bleedge.chat.data.channelPeerId
 import cz.arnal.bleedge.chat.data.channelPskHexOf
 import cz.arnal.bleedge.chat.data.isChannelPeer
 import cz.arnal.bleedge.chatproto.ChatChannel
+import cz.arnal.bleedge.chatproto.ChatChannelReaction
 import cz.arnal.bleedge.chatproto.ChatKind
 import cz.arnal.bleedge.protocol.BLEEdge
 import cz.arnal.bleedge.protocol.Identity
@@ -70,6 +72,9 @@ private val THEME_KEY = stringPreferencesKey("theme_mode")
 
 /** How long a discovered contact survives after it was last heard advertising. */
 private const val DISCOVERED_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
+
+/** Title of the conversation with one's own node — a local notepad, à la Signal. */
+const val NOTE_TO_SELF = "Note to Self"
 
 /** How contact/channel avatars are drawn. */
 enum class AvatarStyle(val value: String) {
@@ -130,6 +135,18 @@ data class ProfileInfo(
     val channelHash: Int = 0,
     val pskHex: String = "",
     val neighborHexes: List<String> = emptyList(), // this node's directly-connected neighbors (from its ANNOUNCE)
+    // MeshCore / discovery info. [isMeshCore] = the node is a bridged MeshCore node (not directly
+    // DM-reachable). [isDiscovered] = heard advertising but not yet saved as a contact. The rest
+    // mirror the bridged ADVERT and are shown in the profile's MeshCore section.
+    val isMeshCore: Boolean = false,
+    val isDiscovered: Boolean = false,
+    val isSelf: Boolean = false, // this is our own identity (profile opened from our avatar)
+    val nodeType: Int = 0,
+    val hasGps: Boolean = false,
+    val lat: Double = 0.0,
+    val lon: Double = 0.0,
+    val sigVerified: Boolean = false,
+    val nodeAdvertisedMs: Long = 0L,
 )
 
 /**
@@ -319,20 +336,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val channels: StateFlow<List<Channel>> =
         dao.channels().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** Emoji reactions grouped by the message id they target, for the conversation UI. */
+    val reactions: StateFlow<Map<String, List<Reaction>>> =
+        dao.allReactions().map { it.groupBy { r -> r.messageId } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
     /**
      * Direct conversations for the Chats tab: one row per peer we've messaged, plus every saved
      * contact (even with no messages yet, so they're reachable from Chats). Channels are merged in
      * separately by [chatItems].
      */
     val conversations: StateFlow<List<ConversationSummary>> =
-        combine(dao.allMessages(), contacts, topology) { msgs, contacts, topo ->
+        combine(dao.allMessages(), contacts, topology, nodeId) { msgs, contacts, topo, me ->
             val byNode = contacts.associateBy { it.nodeHex }
+            val meHex = me.toHex()
+            // The conversation with our own node is "Note to Self".
+            fun titleFor(peer: String) = if (peer == meHex) NOTE_TO_SELF else displayName(peer, byNode, topo)
             val byPeer = msgs.filter { !isChannelPeer(it.peerHex) }.groupBy { it.peerHex }
             val messaged = byPeer.map { (peer, list) ->
                 val last = list.maxByOrNull { it.timestampMs }!!
                 ConversationSummary(
                     peerHex = peer,
-                    title = displayName(peer, byNode, topo),
+                    title = titleFor(peer),
                     pubKeyHex = publicKeyHex(peer, byNode, topo),
                     lastText = last.text,
                     lastTimestampMs = last.timestampMs,
@@ -343,7 +368,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val contactOnly = contacts.filter { it.nodeHex !in byPeer.keys }.map { c ->
                 ConversationSummary(
                     peerHex = c.nodeHex,
-                    title = displayName(c.nodeHex, byNode, topo),
+                    title = titleFor(c.nodeHex),
                     pubKeyHex = publicKeyHex(c.nodeHex, byNode, topo),
                     lastText = "",
                     lastTimestampMs = 0L,
@@ -391,6 +416,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             (dmItems + chanItems).sortedByDescending { it.lastTimestampMs }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Index of saved contacts by display name (lowercased) → node id. Used to resolve a bridged
+     * channel's *declared* sender (or an `@mention`) — which carries no public key — back to a
+     * saved identity when the names match. Built from contacts only ("our database").
+     */
+    val contactNameIndex: StateFlow<Map<String, String>> =
+        combine(contacts, topology) { c, t ->
+            val byNode = c.associateBy { it.nodeHex }
+            val out = HashMap<String, String>(c.size)
+            c.forEach { out[displayName(it.nodeHex, byNode, t).lowercase()] = it.nodeHex }
+            out
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** Resolves a declared name to a saved contact's node id (hex), or null if none matches. */
+    fun nodeHexForName(name: String): String? = contactNameIndex.value[name.trim().lowercase()]
 
     /**
      * Every node we can start an encrypted chat with — i.e. whose public key we know,
@@ -673,8 +714,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ChatKind.DIRECT_TEXT -> handleIncomingDm(msg)
             ChatKind.CHANNEL_TEXT -> handleIncomingChannel(msg)
             ChatKind.TYPING -> showTyping(msg.fromNodeId.toHex(), msg.sentAtMs)
+            ChatKind.DIRECT_REACTION -> handleIncomingDirectReaction(msg)
+            ChatKind.CHANNEL_REACTION -> handleIncomingChannelReaction(msg)
             else -> return // PUBLIC_TEXT / other: not part of the direct/channel chat model
         }
+    }
+
+    private suspend fun handleIncomingDirectReaction(msg: ReceivedMessage) {
+        val target = msg.reactionTargetRef ?: return
+        if (!processed.add(msg.datagramId.toHex())) return
+        applyReaction(target, msg.fromNodeId.toHex(), msg.reactionEmoji.orEmpty(), msg.reactionRemove, msg.timestampMs)
+    }
+
+    private suspend fun handleIncomingChannelReaction(msg: ReceivedMessage) {
+        val cp = msg.channelReactionPayload ?: return
+        if (!processed.add(msg.datagramId.toHex())) return
+        val hashByte = ChatChannel.payloadChannelHash(cp) ?: return
+        for (ch in dao.channelsByHash(hashByte)) {
+            val d = ChatChannelReaction.decodePayload(ch.pskHex.hexToBytes(), cp) ?: continue
+            applyReaction(d.targetRef, msg.fromNodeId.toHex(), d.emoji, d.remove, msg.timestampMs)
+            return
+        }
+    }
+
+    /** Adds or removes one author's emoji reaction on a target message (empty emoji = ignore). */
+    private suspend fun applyReaction(messageId: String, author: String, emoji: String, remove: Boolean, ts: Long) {
+        if (author.isBlank()) return
+        if (remove || emoji.isBlank()) dao.deleteReaction(messageId, author)
+        else dao.upsertReaction(Reaction(messageId, author, emoji, ts))
     }
 
     /** Marks [peerHex] as typing and (re)arms a timer to clear it if no fresh hint arrives. */
@@ -737,7 +804,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 Message(
                     id = id,
                     peerHex = channelPeerId(ch.pskHex),
-                    senderHex = msg.fromNodeId.toHex(),
+                    // A bridged author is unverifiable (no public key) — keep only its declared
+                    // name and record which BLEEdge node bridged it. Native channel messages keep
+                    // the real originating node as the sender.
+                    senderHex = if (msg.fromMeshCore) "" else msg.fromNodeId.toHex(),
+                    bridgeHex = if (msg.fromMeshCore) msg.fromNodeId.toHex() else "",
                     senderName = decoded.senderLabel,
                     incoming = true,
                     text = decoded.text,
@@ -762,7 +833,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val key = pub?.takeIf { it.size == 32 } ?: topo?.publicKey?.takeIf { it.size == 32 } ?: return
         val existing = dao.contactByNode(nodeHex)
         val desc = topo?.description ?: existing?.description ?: ""
-        dao.upsertContact(Contact(nodeHex, key.toHex(), desc, localName = existing?.localName.orEmpty()))
+        dao.upsertContact(
+            Contact(nodeHex, key.toHex(), desc, localName = existing?.localName.orEmpty(),
+                isMeshCore = existing?.isMeshCore ?: false),
+        )
     }
 
     // ---- actions -------------------------------------------------------------
@@ -772,14 +846,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val existing = dao.contactByNode(node.nodeHex)
             dao.upsertContact(
-                Contact(node.nodeHex, node.pubKeyHex, node.description, localName = existing?.localName.orEmpty()),
+                Contact(node.nodeHex, node.pubKeyHex, node.description,
+                    localName = existing?.localName.orEmpty(), isMeshCore = existing?.isMeshCore ?: false),
+            )
+        }
+    }
+
+    /**
+     * Adds [peerHex] to contacts (from a discovered node or the topology) so it appears in Chats,
+     * resolving its public key and carrying over MeshCore origin / advertised name. Used when
+     * starting a chat from a discovered node's profile. No-op if it's already a contact.
+     */
+    fun startChat(peerHex: String) {
+        viewModelScope.launch {
+            val existing = dao.contactByNode(peerHex)
+            val topo = topology.value.firstOrNull { it.nodeId.toHex() == peerHex }
+            val disc = discoveredContacts.value.firstOrNull { it.nodeHex == peerHex }
+                ?: dao.discoveredByPubKey(existing?.pubKeyHex.orEmpty())
+            val pub = existing?.pubKeyHex?.takeIf { it.length == 64 }
+                ?: topo?.publicKey?.takeIf { it.size == 32 }?.toHex()
+                ?: disc?.pubKeyHex?.takeIf { it.length == 64 }
+                ?: ""
+            val isMeshCore = existing?.isMeshCore ?: (disc?.source == DiscoverySource.MESHCORE)
+            // Keep a chosen alias; else seed a MeshCore node's advertised name as the local name.
+            val localName = existing?.localName?.takeIf { it.isNotBlank() }
+                ?: disc?.name?.takeIf { isMeshCore && it.isNotBlank() }
+                ?: ""
+            dao.upsertContact(
+                Contact(peerHex, pub, existing?.description.orEmpty(), localName = localName, isMeshCore = isMeshCore),
             )
         }
     }
 
     /** Live profile (name, public key, contact state) for the profile page. */
     fun profileFor(peerHex: String): StateFlow<ProfileInfo> =
-        combine(contacts, topology, channels) { c, t, chans ->
+        combine(contacts, topology, channels, dao.discoveredContacts()) { c, t, chans, discovered ->
             if (isChannelPeer(peerHex)) {
                 val psk = channelPskHexOf(peerHex)
                 val ch = chans.firstOrNull { it.pskHex == psk }
@@ -800,24 +901,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     nodeHex = peerHex,
                     pubKeyHex = myPubKeyHex.value,
                     isContact = false,
+                    isSelf = true,
                     online = true,
                     description = _description.value,
                     platform = _service.value?.defaultPlatform() ?: "",
                 )
             } else {
                 val byNode = c.associateBy { it.nodeHex }
+                val contact = byNode[peerHex]
+                val inTopo = t.any { it.nodeId.toHex() == peerHex }
+                // Discovered (heard advertising) row — by node id, then public key. Kept even after
+                // the node becomes a contact so the profile's MeshCore section still resolves.
+                val pubFromKnown = publicKeyHex(peerHex, byNode, t)
+                val disc = discovered.firstOrNull { it.nodeHex == peerHex }
+                    ?: pubFromKnown.takeIf { it.isNotBlank() }?.let { pk -> discovered.firstOrNull { it.pubKeyHex == pk } }
+                val isContact = contact != null
+                val pub = pubFromKnown.ifBlank { disc?.pubKeyHex.orEmpty() }
+                val name = when {
+                    isContact || inTopo -> displayName(peerHex, byNode, t)
+                    !disc?.name.isNullOrBlank() -> disc!!.name
+                    pub.isNotBlank() -> nameFromPubKey(pub).ifBlank { shortHex(peerHex) }
+                    else -> shortHex(peerHex)
+                }
+                val isMeshCore = contact?.isMeshCore ?: (disc?.source == DiscoverySource.MESHCORE)
                 ProfileInfo(
                     peerHex = peerHex,
                     isChannel = false,
-                    name = displayName(peerHex, byNode, t),
+                    name = name,
                     nodeHex = peerHex,
-                    pubKeyHex = publicKeyHex(peerHex, byNode, t),
-                    isContact = byNode[peerHex] != null,
-                    online = t.any { it.nodeId.toHex() == peerHex },
+                    pubKeyHex = pub,
+                    isContact = isContact,
+                    online = inTopo,
                     description = nodeDescription(peerHex, byNode, t),
                     platform = nodePlatform(peerHex, t),
                     neighborHexes = t.firstOrNull { it.nodeId.toHex() == peerHex }
                         ?.neighborIds?.map { it.toHex() } ?: emptyList(),
+                    isMeshCore = isMeshCore,
+                    isDiscovered = !isContact && disc != null,
+                    nodeType = disc?.nodeType ?: 0,
+                    hasGps = disc?.hasGps ?: false,
+                    lat = disc?.lat ?: 0.0,
+                    lon = disc?.lon ?: 0.0,
+                    sigVerified = disc?.sigVerified ?: false,
+                    nodeAdvertisedMs = disc?.nodeAdvertisedMs ?: 0L,
                 )
             }
         }.stateIn(
@@ -837,14 +963,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     ?.publicKey?.takeIf { it.size == 32 }?.toHex()
                 ?: ""
             dao.upsertContact(
-                Contact(nodeHex, pub, existing?.description.orEmpty(), localName = newName.trim()),
+                Contact(nodeHex, pub, existing?.description.orEmpty(), localName = newName.trim(),
+                    isMeshCore = existing?.isMeshCore ?: false),
             )
         }
     }
 
-    /** Removes a node from saved contacts (its messages and topology entry stay). */
+    /**
+     * Removes a contact along with its conversation history — a contact and its chat are one and
+     * the same in Chats, so deleting one deletes the other (the node can be re-discovered in
+     * Explore). See also [deleteChat].
+     */
     fun deleteContact(nodeHex: String) {
-        viewModelScope.launch { dao.deleteContact(nodeHex) }
+        viewModelScope.launch {
+            dao.deleteContact(nodeHex)
+            dao.deleteReactionsForPeer(nodeHex)
+            dao.deleteMessagesFor(nodeHex)
+        }
     }
 
     /** Renames a joined channel (keeps its PSK / hash). */
@@ -886,6 +1021,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun sendChat(peerHex: String, text: String) {
         val body = text.trim()
         if (body.isEmpty()) return
+        // Note to Self: a local notepad — store the note, never transmit it over the mesh.
+        if (peerHex == nodeId.value.toHex()) {
+            viewModelScope.launch {
+                dao.insertMessage(
+                    Message(
+                        id = newId(), peerHex = peerHex, senderHex = peerHex, incoming = false,
+                        text = body, timestampMs = System.currentTimeMillis(), status = MsgStatus.DELIVERED,
+                    )
+                )
+            }
+            return
+        }
         val service = _service.value ?: return
         stopTyping(peerHex)
         viewModelScope.launch {
@@ -930,6 +1077,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     status = MsgStatus.SENT, // broadcast — no per-message ACK
                 )
             )
+        }
+    }
+
+    /**
+     * Toggles my emoji reaction on [msg]: tapping the same emoji removes it, a different emoji
+     * replaces it. Applied locally at once and broadcast/sent over the mesh (DIRECT_REACTION for a
+     * DM, CHANNEL_REACTION for a channel) so other members converge.
+     */
+    fun toggleReaction(msg: Message, emoji: String) {
+        val me = nodeId.value.toHex()
+        viewModelScope.launch {
+            val remove = dao.reactionBy(msg.id, me)?.emoji == emoji
+            applyReaction(msg.id, me, emoji, remove, System.currentTimeMillis())
+            val service = _service.value ?: return@launch
+            if (isChannelPeer(msg.peerHex)) {
+                val secret = channelPskHexOf(msg.peerHex).hexToBytes()
+                val label = myName.value.ifBlank { shortHex(me) }
+                service.sendChannelReaction(secret, label, msg.id, emoji, remove)
+            } else {
+                val dst = NodeId.fromHex(msg.peerHex)
+                val pub = dao.contactByNode(msg.peerHex)?.pubKeyHex?.takeIf { it.length == 64 }?.hexToBytes()
+                service.sendDirectReaction(dst, pub, msg.id, emoji, remove)
+            }
         }
     }
 
@@ -984,7 +1154,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch {
                 val existing = dao.contactByNode(nodeHex)
                 dao.upsertContact(
-                    Contact(nodeHex, c.publicKeyHex, existing?.description.orEmpty(), localName = c.name),
+                    Contact(nodeHex, c.publicKeyHex, existing?.description.orEmpty(), localName = c.name,
+                        isMeshCore = existing?.isMeshCore ?: false),
                 )
             }
             _pendingOpenPeer.value = nodeHex
@@ -1010,9 +1181,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { dao.markRead(peerHex) }
     }
 
-    /** Deletes a direct conversation's message history (removes it from the chat list). */
+    /**
+     * Deletes a conversation. For a direct chat this also removes the contact, so it disappears
+     * from Chats entirely (it can be re-discovered in Explore); channel history is just cleared.
+     */
     fun deleteChat(peerHex: String) {
-        viewModelScope.launch { dao.deleteMessagesFor(peerHex) }
+        viewModelScope.launch {
+            dao.deleteReactionsForPeer(peerHex)
+            dao.deleteMessagesFor(peerHex)
+            if (!isChannelPeer(peerHex)) dao.deleteContact(peerHex)
+        }
     }
 
     fun setDescription(text: String) {
@@ -1095,6 +1273,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Resolves a node id (hex) to its best-known display name, for route detail rendering. */
     fun nameForHex(hex: String): String =
         displayName(hex, contacts.value.associateBy { it.nodeHex }, topology.value)
+
+    /** Resolves a node id (hex) to its 32-byte public key (hex), for identicon avatars, or "". */
+    fun pubKeyForHex(hex: String): String =
+        if (hex == nodeId.value.toHex()) myPubKeyHex.value
+        else publicKeyHex(hex, contacts.value.associateBy { it.nodeHex }, topology.value)
 
     /** This node's own NodeId as hex — used to exclude self from route pickers. */
     fun myNodeHex(): String = nodeId.value.toHex()

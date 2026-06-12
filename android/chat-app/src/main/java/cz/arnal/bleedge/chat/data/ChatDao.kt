@@ -59,6 +59,23 @@ interface ChatDao {
     @Query("DELETE FROM channels WHERE pskHex = :pskHex")
     suspend fun deleteChannel(pskHex: String)
 
+    // ---- reactions ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertReaction(reaction: Reaction)
+
+    @Query("SELECT * FROM reactions WHERE messageId = :messageId AND authorHex = :authorHex LIMIT 1")
+    suspend fun reactionBy(messageId: String, authorHex: String): Reaction?
+
+    @Query("DELETE FROM reactions WHERE messageId = :messageId AND authorHex = :authorHex")
+    suspend fun deleteReaction(messageId: String, authorHex: String)
+
+    @Query("SELECT * FROM reactions")
+    fun allReactions(): Flow<List<Reaction>>
+
+    /** Drops reactions on every message of a conversation (called when the chat is deleted). */
+    @Query("DELETE FROM reactions WHERE messageId IN (SELECT id FROM messages WHERE peerHex = :peer)")
+    suspend fun deleteReactionsForPeer(peer: String)
+
     // ---- discovered contacts ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDiscovered(contact: DiscoveredContact)

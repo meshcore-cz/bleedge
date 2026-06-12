@@ -5,8 +5,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -33,9 +36,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Forward
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
@@ -51,9 +59,11 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -68,10 +78,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import android.widget.Toast
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -85,11 +100,14 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cz.arnal.bleedge.chat.ChatViewModel
+import cz.arnal.bleedge.chat.NOTE_TO_SELF
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import cz.arnal.bleedge.chat.MeshCoreUri
 import cz.arnal.bleedge.chat.ProfileInfo
 import cz.arnal.bleedge.chat.data.ChannelKind
 import cz.arnal.bleedge.chat.data.Message
+import cz.arnal.bleedge.chat.data.MsgStatus
 import cz.arnal.bleedge.chat.data.channelPskHexOf
 import cz.arnal.bleedge.chat.data.isChannelPeer
 
@@ -102,10 +120,21 @@ fun ConversationScreen(
     onOpenProfile: ((String) -> Unit)? = null,
 ) {
     val isChannel = isChannelPeer(peerHex)
+    val isSelf = peerHex == vm.myNodeHex()
     val messages by remember(peerHex) { vm.messagesFor(peerHex) }.collectAsState()
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var detailsFor by remember { mutableStateOf<Message?>(null) }
+    // Message the long-press actions sheet is open for, and (separately) one whose reaction we're
+    // picking a non-quick emoji for via the full picker.
+    var actionsFor by remember { mutableStateOf<Message?>(null) }
+    var emojiReactFor by remember { mutableStateOf<Message?>(null) }
+    // Message whose reaction viewer (who reacted) is open, and the emoji tab to preselect.
+    var reactionsFor by remember { mutableStateOf<Message?>(null) }
+    var reactionsEmoji by remember { mutableStateOf<String?>(null) }
+    // Hoisted so reacting from the actions sheet can scroll the new reaction into view.
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var searching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
@@ -113,6 +142,8 @@ fun ConversationScreen(
     var showEmoji by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmDeleteChat by remember { mutableStateOf(false) }
+    // A tapped @mention / declared sender that doesn't match any saved contact.
+    var unknownMention by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(peerHex, messages.size) { vm.markRead(peerHex) }
 
@@ -122,13 +153,20 @@ fun ConversationScreen(
 
     // Repeats of our own flooded messages heard back, keyed by packet-id hex (= message id).
     val floodRepeats by vm.floodRepeats.collectAsState()
+    // Per-DM delivery progress (attempts/acked/failed), keyed by message id.
+    val dmDeliveries by vm.dmDeliveries.collectAsState()
+    // Saved contacts indexed by name — resolves a bridged declared sender / @mention to a profile.
+    val contactIndex by vm.contactNameIndex.collectAsState()
+    // Emoji reactions, grouped by target message id.
+    val reactionsByMsg by vm.reactions.collectAsState()
+    val myHex = vm.myNodeHex()
 
     // Outgoing typing hints are STARTED only from a genuine user edit (see the input's
     // onChange below) — never merely from opening the conversation or a programmatic draft
     // change. This idle timer only STOPS: ~5s after the last text change with no new
     // keystroke we consider the user stopped. Leaving the screen also stops it.
     LaunchedEffect(draft.text, peerHex, isChannel) {
-        if (isChannel || draft.text.isBlank()) return@LaunchedEffect
+        if (isChannel || isSelf || draft.text.isBlank()) return@LaunchedEffect
         delay(5_000)
         vm.stopTyping(peerHex)
     }
@@ -140,8 +178,12 @@ fun ConversationScreen(
         messages.filter { it.senderName.isNotBlank() && it.senderHex.isNotBlank() }
             .associate { it.senderName to it.senderHex }
     }
+    // Resolve a name to a profile: a saved contact first ("our database"), then a real (native)
+    // channel author seen in this room. Unresolved names show a "can't find contact" notice.
+    fun resolveName(name: String): String? = contactIndex[name.trim().lowercase()] ?: mentionTargets[name]
     val onMentionClick: (String) -> Unit = { name ->
-        mentionTargets[name]?.let { hex -> onOpenProfile?.invoke(hex) }
+        val hex = resolveName(name)
+        if (hex != null) onOpenProfile?.invoke(hex) else unknownMention = name
     }
 
     val mentionQuery = if (isChannel) mentionQueryOf(draft.text) else null
@@ -178,17 +220,22 @@ fun ConversationScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = if (onOpenProfile != null) Modifier.clickable { onOpenProfile(peerHex) } else Modifier,
                         ) {
-                            Avatar(
-                                seed = peerHex,
-                                label = profile.name,
-                                size = 36,
-                                identiconKey = if (!isChannel) profile.pubKeyHex else null,
-                            )
+                            if (isSelf) {
+                                NoteToSelfAvatar(size = 36)
+                            } else {
+                                Avatar(
+                                    seed = peerHex,
+                                    label = profile.name,
+                                    size = 36,
+                                    identiconKey = if (!isChannel) profile.pubKeyHex else null,
+                                )
+                            }
                             Spacer(Modifier.width(10.dp))
                             Column {
-                                Text(profile.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                                val showKey = !isChannel && !peerTyping && profile.pubKeyHex.isNotBlank()
+                                Text(if (isSelf) NOTE_TO_SELF else profile.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                val showKey = !isSelf && !isChannel && !peerTyping && profile.pubKeyHex.isNotBlank()
                                 val subtitle = when {
+                                    isSelf -> "Only you can see these"
                                     peerTyping -> "typing…"
                                     isChannel && profile.channelKind == ChannelKind.SECRET -> "Channel · shared-key encrypted"
                                     isChannel -> "Channel · anyone can read this"
@@ -264,7 +311,7 @@ fun ConversationScreen(
                         // hint (DMs only), and only when the text actually changed to non-blank.
                         val textChanged = newValue.text != draft.text
                         draft = newValue
-                        if (!isChannel && textChanged) {
+                        if (!isChannel && !isSelf && textChanged) {
                             if (newValue.text.isNotBlank()) vm.onUserTyping(peerHex)
                             else vm.stopTyping(peerHex)
                         }
@@ -290,7 +337,6 @@ fun ConversationScreen(
             SearchHint("Start typing to search messages…", Modifier.fillMaxSize().padding(padding))
             return@Scaffold
         }
-        val listState = rememberLazyListState()
         // Jump straight to the newest message on first load (no visible scroll-down), then
         // animate to the bottom only for messages arriving while the chat is open. Skipped
         // while searching so the filtered view doesn't auto-scroll.
@@ -332,12 +378,28 @@ fun ConversationScreen(
             // brand-new conversation. Hidden while searching so results aren't pushed down.
             if (!searching) {
                 item(key = "__header__") {
-                    ConversationHeaderPanel(profile, isChannel, onClick = { onOpenProfile?.invoke(peerHex) })
+                    ConversationHeaderPanel(profile, isChannel, isSelf, onClick = { onOpenProfile?.invoke(peerHex) })
                 }
             }
             itemsIndexed(shown, key = { _, m -> m.id }) { i, msg ->
                 val sender = if (isChannel) msg.senderName.ifBlank { vm.nameForHex(msg.senderHex) }
                 else vm.nameForHex(msg.senderHex)
+                // Resolve a channel author to a saved/real identity. A bridged ("virtual") author
+                // only links when its declared name matches a contact; otherwise it gets a distinct
+                // hashed color and tapping it explains we can't link it.
+                val matchedHex = when {
+                    !isChannel -> null
+                    msg.viaMeshCore -> resolveName(msg.senderName)
+                    else -> msg.senderHex.takeIf { it.isNotBlank() }
+                }
+                val virtual = isChannel && msg.viaMeshCore && matchedHex == null
+                val senderColor = if (virtual) virtualNameColor(sender) else MaterialTheme.colorScheme.primary
+                val onSenderClick: (() -> Unit)? = if (isChannel && msg.incoming) {
+                    {
+                        if (matchedHex != null) onOpenProfile?.invoke(matchedHex)
+                        else unknownMention = sender
+                    }
+                } else null
                 Column {
                     // Date separator whenever the day changes (first message always gets one).
                     if (!searching) {
@@ -347,7 +409,16 @@ fun ConversationScreen(
                         }
                     }
                     val repeatCount = floodRepeats[msg.id]?.size ?: 0
-                    MessageBubble(msg, isChannel, sender, repeatCount, onMentionClick) { detailsFor = msg }
+                    MessageBubble(
+                        msg, isChannel, sender, senderColor, onSenderClick,
+                        repeatCount, dmDeliveries[msg.id], onMentionClick,
+                        reactions = reactionsByMsg[msg.id].orEmpty(),
+                        myHex = myHex,
+                        mentionResolved = { name -> resolveName(name) != null },
+                        onChipClick = { emoji -> reactionsEmoji = emoji; reactionsFor = msg },
+                        onLongPress = { actionsFor = msg },
+                        onClick = { detailsFor = msg },
+                    )
                 }
             }
             // Animated "…" bubble where the peer's next message will appear, while they type.
@@ -359,6 +430,46 @@ fun ConversationScreen(
 
     detailsFor?.let { msg ->
         MessageDetailsSheet(msg, vm, onOpenProfile = onOpenProfile) { detailsFor = null }
+    }
+    actionsFor?.let { msg ->
+        val clipboard = LocalClipboardManager.current
+        val context = LocalContext.current
+        MessageActionsSheet(
+            msg = msg,
+            onReact = { emoji ->
+                vm.toggleReaction(msg, emoji)
+                actionsFor = null
+                // A new reaction overhangs the bubble bottom — scroll the newest into view.
+                if (shown.lastOrNull()?.id == msg.id) scope.launch { listState.animateScrollToItem(messages.size) }
+            },
+            onMoreEmoji = { actionsFor = null; emojiReactFor = msg },
+            onCopy = {
+                clipboard.setText(AnnotatedString(msg.text))
+                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                actionsFor = null
+            },
+            onInfo = { actionsFor = null; detailsFor = msg },
+            onDismiss = { actionsFor = null },
+        )
+    }
+    emojiReactFor?.let { msg ->
+        EmojiPickerSheet(
+            onPick = { emoji ->
+                vm.toggleReaction(msg, emoji)
+                emojiReactFor = null
+                if (shown.lastOrNull()?.id == msg.id) scope.launch { listState.animateScrollToItem(messages.size) }
+            },
+            onDismiss = { emojiReactFor = null },
+        )
+    }
+    reactionsFor?.let { msg ->
+        ReactionsSheet(
+            msg = msg,
+            vm = vm,
+            myHex = myHex,
+            initialEmoji = reactionsEmoji,
+            onDismiss = { reactionsFor = null; reactionsEmoji = null },
+        )
     }
     if (showShare && shareUri != null) {
         ShareQrSheet(
@@ -398,7 +509,7 @@ fun ConversationScreen(
         AlertDialog(
             onDismissRequest = { confirmDeleteChat = false },
             title = { Text("Delete chat?") },
-            text = { Text("This permanently deletes this conversation's messages on this device. The contact stays.") },
+            text = { Text("This removes ${profile.name} from your contacts and deletes this conversation on this device. You can re-add them from Explore.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDeleteChat = false
@@ -409,6 +520,14 @@ fun ConversationScreen(
             dismissButton = { TextButton(onClick = { confirmDeleteChat = false }) { Text("Cancel") } },
         )
     }
+    unknownMention?.let { name ->
+        AlertDialog(
+            onDismissRequest = { unknownMention = null },
+            title = { Text("Unknown contact") },
+            text = { Text("We can't find “$name” in your contacts. Bridged MeshCore names carry no public key, so they can't be linked to a profile.") },
+            confirmButton = { TextButton(onClick = { unknownMention = null }) { Text("OK") } },
+        )
+    }
 }
 
 /** An incoming-style bubble with three pulsing dots, shown while the peer is typing. */
@@ -416,7 +535,7 @@ fun ConversationScreen(
 private fun TypingBubble() {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(16.dp),
         ) {
             Row(
@@ -447,6 +566,165 @@ private fun TypingBubble() {
     }
 }
 
+/** Quick-reaction emojis offered in the long-press bar (Signal-style); "+" opens the full picker. */
+private val quickReactions = listOf("❤️", "👍", "👎", "😂", "😮", "😢")
+
+/**
+ * The long-press message menu: a row of quick emoji reactions over a list of actions. Reply,
+ * Forward, Select and Delete are placeholders (disabled) for now; Copy and Info are active.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionsSheet(
+    msg: Message,
+    onReact: (String) -> Unit,
+    onMoreEmoji: () -> Unit,
+    onCopy: () -> Unit,
+    onInfo: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                quickReactions.forEach { emoji ->
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.size(40.dp).clickable { onReact(emoji) },
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(emoji, style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                }
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(40.dp).clickable(onClick = onMoreEmoji),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.Add, contentDescription = "More emoji")
+                    }
+                }
+            }
+            HorizontalDivider()
+            ActionRow(Icons.AutoMirrored.Filled.Reply, "Reply", enabled = false) {}
+            ActionRow(Icons.AutoMirrored.Filled.Forward, "Forward", enabled = false) {}
+            ActionRow(Icons.Default.ContentCopy, "Copy", enabled = msg.text.isNotBlank(), onClick = onCopy)
+            ActionRow(Icons.Default.Done, "Select", enabled = false) {}
+            ActionRow(Icons.Default.Info, "Info", enabled = true, onClick = onInfo)
+            ActionRow(Icons.Default.Delete, "Delete", enabled = false, destructive = true) {}
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    enabled: Boolean,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val color = when {
+        !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        destructive -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = color)
+        Text(label, color = color)
+    }
+}
+
+/**
+ * The reaction viewer (opened by tapping a reaction pill): a tab row (All + per-emoji counts) over
+ * the list of people who reacted. Your own reaction shows "Tap to remove" and removing it here
+ * toggles it off. Closes itself once the last reaction is gone.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReactionsSheet(
+    msg: Message,
+    vm: ChatViewModel,
+    myHex: String,
+    initialEmoji: String?,
+    onDismiss: () -> Unit,
+) {
+    val reactionsByMsg by vm.reactions.collectAsState()
+    val all = reactionsByMsg[msg.id].orEmpty()
+    if (all.isEmpty()) {
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
+    val grouped = remember(all) { all.groupBy { it.emoji }.toList().sortedByDescending { it.second.size } }
+    var selected by remember { mutableStateOf(initialEmoji?.takeIf { e -> grouped.any { it.first == e } }) }
+    val shown = if (selected == null) all else all.filter { it.emoji == selected }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            LazyRow(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                item { ReactionTab("All · ${all.size}", selected == null) { selected = null } }
+                items(grouped, key = { it.first }) { (emoji, list) ->
+                    ReactionTab("$emoji ${list.size}", selected == emoji) { selected = emoji }
+                }
+            }
+            HorizontalDivider()
+            shown.sortedByDescending { it.timestampMs }.forEach { r ->
+                val mineR = r.authorHex == myHex
+                val name = if (mineR) "You" else vm.nameForHex(r.authorHex)
+                Row(
+                    Modifier.fillMaxWidth()
+                        .then(if (mineR) Modifier.clickable { vm.toggleReaction(msg, r.emoji) } else Modifier)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Avatar(seed = r.authorHex, label = name, size = 40, identiconKey = vm.pubKeyForHex(r.authorHex).ifBlank { null })
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(name, fontWeight = FontWeight.Medium)
+                        if (mineR) {
+                            Text(
+                                "Tap to remove",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Text(r.emoji, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReactionTab(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Text(
+            label,
+            Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 /** Small pill marking a channel message that arrived over the MeshCore bridge (not native BLEEdge). */
 @Composable
 private fun MeshCoreBadge() {
@@ -474,25 +752,38 @@ private fun MeshCoreBadge() {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     msg: Message,
     isChannel: Boolean,
     senderLabel: String,
+    senderColor: Color,
+    onSenderClick: (() -> Unit)?,
     repeatCount: Int,
+    delivery: cz.arnal.bleedge.service.DmDelivery?,
     onMentionClick: (String) -> Unit,
+    reactions: List<cz.arnal.bleedge.chat.data.Reaction>,
+    myHex: String,
+    mentionResolved: (String) -> Boolean,
+    onChipClick: (String) -> Unit,
+    onLongPress: () -> Unit,
     onClick: () -> Unit,
 ) {
     val mine = !msg.incoming
+    val hasReactions = reactions.isNotEmpty()
     Row(
-        Modifier.fillMaxWidth(),
+        // Reserve room below for the reaction pills, which overhang the bubble's bottom edge.
+        Modifier.fillMaxWidth().padding(bottom = if (hasReactions) 14.dp else 0.dp),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
     ) {
+        Box {
         Surface(
             color = if (mine) MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surfaceVariant,
+            else MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.widthIn(max = 300.dp).clickable(onClick = onClick),
+            modifier = Modifier.widthIn(max = 300.dp)
+                .combinedClickable(onClick = onClick, onLongClick = onLongPress),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 if (isChannel && msg.incoming) {
@@ -500,13 +791,19 @@ private fun MessageBubble(
                         Text(
                             senderLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = senderColor,
                             fontWeight = FontWeight.SemiBold,
+                            modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
                         )
                         if (msg.viaMeshCore) MeshCoreBadge()
                     }
                 }
-                MessageContent(msg.text, enableMentions = isChannel, onMentionClick = onMentionClick)
+                MessageContent(
+                    msg.text,
+                    enableMentions = isChannel,
+                    onMentionClick = onMentionClick,
+                    mentionResolved = mentionResolved,
+                )
                 Spacer(Modifier.size(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
@@ -514,7 +811,22 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (mine) DeliveryTick(msg.status) else RouteIndicator(msg.routeHex)
+                    if (mine) {
+                        if (isChannel) {
+                            // Broadcast — no ACK. Hearing it echoed back is our delivery signal.
+                            DeliveryTick(if (repeatCount > 0) MsgStatus.DELIVERED else MsgStatus.SENT)
+                        } else {
+                            AnimatedDeliveryTick(msg.status, delivery)
+                            // While retrying, show how many attempts have gone out.
+                            if (delivery != null && delivery.attemptsSent > 1 && msg.status != MsgStatus.DELIVERED) {
+                                Text(
+                                    "try ${delivery.attemptsSent}/${delivery.maxTries}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else RouteIndicator(msg.routeHex)
                     // Repeats of this (flooded) message we heard echoed back across the mesh.
                     if (mine && repeatCount > 0) {
                         Icon(
@@ -526,6 +838,59 @@ private fun MessageBubble(
                         Text(
                             "$repeatCount",
                             style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        // Reaction pills overhang the bubble's bottom edge, on the side OPPOSITE the bubble:
+        // mine (right) → bottom-left corner; incoming (left) → bottom-right corner.
+        if (hasReactions) {
+            Box(
+                Modifier.align(if (mine) Alignment.BottomStart else Alignment.BottomEnd)
+                    .offset(x = if (mine) 8.dp else (-8).dp, y = 12.dp),
+            ) {
+                ReactionChips(reactions, myHex, onChipClick)
+            }
+        }
+        }
+    }
+}
+
+/** Grouped emoji-reaction pills overhanging a message; tap one to open the reaction viewer. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ReactionChips(
+    reactions: List<cz.arnal.bleedge.chat.data.Reaction>,
+    myHex: String,
+    onChipClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val grouped = remember(reactions) { reactions.groupBy { it.emoji }.toList().sortedByDescending { it.second.size } }
+    androidx.compose.foundation.layout.FlowRow(
+        modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        grouped.forEach { (emoji, list) ->
+            // Grey pill (with a subtle outline so it reads over a same-colored bubble); count when >1.
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 3.dp,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                modifier = Modifier.clickable { onChipClick(emoji) },
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(emoji, style = MaterialTheme.typography.labelMedium)
+                    if (list.size > 1) {
+                        Text(
+                            "${list.size}",
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -618,11 +983,24 @@ private fun DateSeparator(label: String) {
  * the filler for a brand-new, empty conversation.
  */
 @Composable
-private fun ConversationHeaderPanel(profile: ProfileInfo, isChannel: Boolean, onClick: () -> Unit) {
+private fun ConversationHeaderPanel(profile: ProfileInfo, isChannel: Boolean, isSelf: Boolean, onClick: () -> Unit) {
     Column(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        if (isSelf) {
+            NoteToSelfAvatar(size = 88)
+            Spacer(Modifier.size(10.dp))
+            Text(NOTE_TO_SELF, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+            Spacer(Modifier.size(4.dp))
+            Text(
+                "Jot notes to yourself. They stay on this device.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            return@Column
+        }
         Avatar(
             seed = profile.peerHex,
             label = profile.name,

@@ -75,6 +75,38 @@ object ChatChannel {
     fun decodePayload(secret: ByteArray, channelPayload: ByteArray): Decoded? =
         openGrpTxt(secret, channelPayload)
 
+    /**
+     * Seals arbitrary bytes into a channel-payload envelope (`channel_hash || mac || AES-128-ECB`),
+     * the same membership-authenticated crypto as GRP_TXT but with a caller-defined plaintext.
+     * Used by native channel extensions (e.g. [ChatChannelReaction]) that are NOT MeshCore
+     * GRP_TXT text, so they carry their own framing. [plaintext] is zero-padded to the AES block.
+     */
+    fun sealRaw(secret: ByteArray, plaintext: ByteArray): ByteArray {
+        val padded = zeroPad(plaintext, 16)
+        val ct = aesEcb(Cipher.ENCRYPT_MODE, secret.copyOf(SECRET_BYTES), padded)
+        val mac = mac2(secret, ct)
+        val out = ByteArray(1 + MAC_BYTES + ct.size)
+        out[0] = channelHash(secret)
+        System.arraycopy(mac, 0, out, 1, MAC_BYTES)
+        System.arraycopy(ct, 0, out, 1 + MAC_BYTES, ct.size)
+        return out
+    }
+
+    /**
+     * Verifies + decrypts a [sealRaw] channel-payload with [secret], returning the (still
+     * zero-padded) plaintext bytes, or null on hash/MAC/shape failure. Callers strip padding or
+     * parse a self-delimiting format (CBOR ignores trailing zero bytes).
+     */
+    fun openRaw(secret: ByteArray, channelPayload: ByteArray): ByteArray? {
+        val cp = channelPayload
+        if (cp.size < 1 + MAC_BYTES) return null
+        if (cp[0] != channelHash(secret)) return null
+        val ct = cp.copyOfRange(1 + MAC_BYTES, cp.size)
+        if (ct.isEmpty() || ct.size % 16 != 0) return null
+        if (!constantTimeEquals(cp.copyOfRange(1, 1 + MAC_BYTES), mac2(secret, ct))) return null
+        return aesEcb(Cipher.DECRYPT_MODE, secret.copyOf(SECRET_BYTES), ct)
+    }
+
     // ---- GRP_TXT crypto -------------------------------------------------------
 
     private fun sealGrpTxt(secret: ByteArray, sender: String, text: String, timestamp: Long): ByteArray {

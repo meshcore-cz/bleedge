@@ -20,7 +20,9 @@ import cz.arnal.bleedge.ble.BLEManager
 import cz.arnal.bleedge.ble.BLEPeerLink
 import cz.arnal.bleedge.chatproto.Chat
 import cz.arnal.bleedge.chatproto.ChatChannel
+import cz.arnal.bleedge.chatproto.ChatChannelReaction
 import cz.arnal.bleedge.chatproto.ChatContext
+import cz.arnal.bleedge.chatproto.ChatDirectReaction
 import cz.arnal.bleedge.chatproto.ChatDirectText
 import cz.arnal.bleedge.chatproto.ChatKind
 import cz.arnal.bleedge.chatproto.ChatPublicText
@@ -115,6 +117,13 @@ data class ReceivedMessage(
     val ackedId: ByteArray? = null,
     val isTyping: Boolean = false,
     val channelPayload: ByteArray? = null,
+    // Emoji reactions. DIRECT_REACTION is decrypted by the service ([reactionTargetRef]/[reactionEmoji]/
+    // [reactionRemove] set); CHANNEL_REACTION is passed raw in [channelReactionPayload] for the app to
+    // decode with its joined channel secrets.
+    val reactionTargetRef: String? = null,
+    val reactionEmoji: String? = null,
+    val reactionRemove: Boolean = false,
+    val channelReactionPayload: ByteArray? = null,
     val traceResponse: TraceResponseBody? = null,
     val path: List<NodeId> = emptyList(),
     val fromMeshCore: Boolean = false,
@@ -885,6 +894,16 @@ class BLEEdgeService : Service() {
             ChatKind.CHANNEL_TEXT -> ChatChannel.channelPayload(dg.payload)?.let {
                 ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.CHANNEL_TEXT, channelPayload = it, path = dg.path)
             }
+            ChatKind.DIRECT_REACTION -> ChatDirectReaction.open(id, dg.payload, ctx)?.let {
+                ReceivedMessage(
+                    dg.source, dg.id, dg.protocol, ChatKind.DIRECT_REACTION,
+                    senderPublicKey = it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000,
+                    reactionTargetRef = it.targetRef, reactionEmoji = it.emoji, reactionRemove = it.remove,
+                )
+            }
+            ChatKind.CHANNEL_REACTION -> ChatChannelReaction.channelPayload(dg.payload)?.let {
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.CHANNEL_REACTION, channelReactionPayload = it, path = dg.path)
+            }
             else -> null
         } ?: return
         appendMessage(msg)
@@ -1083,6 +1102,54 @@ class BLEEdgeService : Service() {
         router.markOriginated(dg.id)
         transmit(dg, trackFloodRepeat = true)
         return dg.id
+    }
+
+    /**
+     * Sends an encrypted DIRECT_REACTION (add/remove an emoji on [targetRef], the target message's
+     * id). One-shot, no ACK/retry. Returns true if sent, false if the recipient key is unknown.
+     */
+    fun sendDirectReaction(
+        destination: NodeId,
+        recipientPub: ByteArray?,
+        targetRef: String,
+        emoji: String,
+        remove: Boolean,
+        floodTtl: Int = BLEEdge.DEFAULT_FLOOD_TTL,
+    ): Boolean {
+        val id = identity ?: return false
+        val pub = recipientPub?.takeIf { it.size == 32 } ?: router.publicKeyFor(destination)
+        if (pub == null || pub.size != 32) return false
+        val route = router.selectRoute(destination)
+        val dgId = Datagram.newDatagramId()
+        val ctx = ChatContext(dgId, id.nodeId, destination)
+        val payload = ChatDirectReaction.seal(id, pub, ctx, targetRef, emoji, remove, System.currentTimeMillis() / 1000)
+        val dg = if (route != null)
+            Datagram(id = dgId, source = id.nodeId, destination = destination, ttl = route.size, route = route,
+                protocol = PayloadProtocol.BLEEDGE_CHAT, payload = payload)
+        else
+            Datagram(id = dgId, source = id.nodeId, destination = destination, ttl = floodTtl,
+                protocol = PayloadProtocol.BLEEDGE_CHAT, payload = payload)
+        router.markOriginated(dg.id)
+        transmit(dg)
+        return true
+    }
+
+    /** Sends a native CHANNEL_REACTION (add/remove an emoji on [targetRef]) sealed with [secret]. */
+    fun sendChannelReaction(
+        secret: ByteArray,
+        senderLabel: String,
+        targetRef: String,
+        emoji: String,
+        remove: Boolean,
+        floodTtl: Int = BLEEdge.DEFAULT_FLOOD_TTL,
+    ) {
+        val id = identity ?: return
+        val dgId = Datagram.newDatagramId()
+        val payload = ChatChannelReaction.build(secret, senderLabel, targetRef, emoji, remove, System.currentTimeMillis() / 1000)
+        val dg = Datagram(id = dgId, source = id.nodeId, destination = NodeId.BROADCAST, ttl = floodTtl,
+            protocol = PayloadProtocol.BLEEDGE_CHAT, payload = payload)
+        router.markOriginated(dg.id)
+        transmit(dg)
     }
 
     /** Sends an ephemeral signed typing hint (no ACK). Best-effort. */

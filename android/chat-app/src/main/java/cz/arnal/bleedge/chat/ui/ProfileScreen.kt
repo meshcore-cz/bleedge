@@ -20,10 +20,12 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -68,6 +70,7 @@ fun ProfileScreen(
     onOpenConversation: (String) -> Unit,
     onTrace: (String) -> Unit,
     onOpenProfile: (String) -> Unit = {},
+    onOpenSettings: () -> Unit = {},
 ) {
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var renaming by remember { mutableStateOf(false) }
@@ -114,6 +117,12 @@ fun ProfileScreen(
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center,
             )
+
+            // Mark bridged MeshCore identities — they're full contacts but not directly DM-reachable.
+            if (profile.isMeshCore) {
+                Spacer(Modifier.size(6.dp))
+                MeshCoreProfileBadge()
+            }
 
             // Public key (users) shown right under the name, same compact form as the chat list,
             // with a key icon to reveal the full key and copy it to the clipboard.
@@ -174,7 +183,11 @@ fun ProfileScreen(
             // Actions, kept compact and up near the hero. Primary action is full-width; the
             // rest are a row of small icon-over-label buttons.
             Button(
-                onClick = { onOpenConversation(peerHex) },
+                // Messaging a discovered node first saves it as a contact so it persists in Chats.
+                onClick = {
+                    if (!profile.isChannel) vm.startChat(peerHex)
+                    onOpenConversation(peerHex)
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null)
@@ -182,8 +195,9 @@ fun ProfileScreen(
                 Text(if (profile.isChannel) "Open channel" else "Message")
             }
             Spacer(Modifier.size(8.dp))
-            // Primary actions: Show QR · Rename · Trace (Trace is user-only). The QR is no
-            // longer rendered inline — "Show QR" opens it in a sheet.
+            // Primary actions. Our own profile gets Settings (no Rename/Trace of self); everyone
+            // else gets Rename + Trace. "Show QR" opens the share sheet. Messaging a discovered node
+            // adds it as a contact automatically, so there's no separate "Add contact".
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -191,9 +205,13 @@ fun ProfileScreen(
                 if (shareUri != null) {
                     CompactAction(Icons.Default.QrCode2, "Show QR") { showShare = true }
                 }
-                CompactAction(Icons.Default.Edit, "Rename") { renaming = true }
-                if (!profile.isChannel) {
-                    CompactAction(Icons.Default.Route, "Trace") { onTrace(peerHex) }
+                if (profile.isSelf) {
+                    CompactAction(Icons.Default.Settings, "Settings") { onOpenSettings() }
+                } else {
+                    CompactAction(Icons.Default.Edit, "Rename") { renaming = true }
+                    if (!profile.isChannel) {
+                        CompactAction(Icons.Default.Route, "Trace") { onTrace(peerHex) }
+                    }
                 }
             }
 
@@ -257,7 +275,7 @@ fun ProfileScreen(
             text = {
                 Text(
                     if (profile.isChannel) "You'll stop receiving messages on ${channelLabel(profile.name, profile.channelKind)}. You can rejoin later."
-                    else "Remove ${profile.name} from your contacts. Your message history stays.",
+                    else "Remove ${profile.name} from your contacts and delete this conversation. You can re-add them from Explore.",
                 )
             },
             confirmButton = {
@@ -367,6 +385,41 @@ private fun UserInfo(p: ProfileInfo) {
         if (p.platform.isNotBlank()) InfoRow("Platform", p.platform)
         InfoRow("Status", if (p.online) "Online (announcing)" else "Not currently visible")
         InfoRow("In contacts", if (p.isContact) "Yes" else "No")
+        // Extra section for bridged MeshCore nodes (from the last ADVERT we heard).
+        if (p.isMeshCore) {
+            InfoRow("Network", "MeshCore (bridged — not directly reachable)")
+            if (p.nodeType != 0) InfoRow("Node type", nodeTypeLabel(p.nodeType))
+            InfoRow("Signature", if (p.sigVerified) "verified" else "unverified")
+            if (p.hasGps) InfoRow("Location", "%.6f, %.6f".format(p.lat, p.lon))
+            if (p.nodeAdvertisedMs > 0) InfoRow("Advertised", formatRelative(p.nodeAdvertisedMs))
+        }
+    }
+}
+
+/** Small "MeshCore" pill shown under the name for bridged MeshCore identities. */
+@Composable
+private fun MeshCoreProfileBadge() {
+    androidx.compose.material3.Surface(
+        color = androidx.compose.ui.graphics.Color(0xFF00838F).copy(alpha = 0.16f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                Icons.Default.Hub,
+                contentDescription = null,
+                modifier = Modifier.size(13.dp),
+                tint = androidx.compose.ui.graphics.Color(0xFF00838F),
+            )
+            Text(
+                "MeshCore",
+                style = MaterialTheme.typography.labelMedium,
+                color = androidx.compose.ui.graphics.Color(0xFF00838F),
+            )
+        }
     }
 }
 

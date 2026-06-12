@@ -29,6 +29,8 @@ object ChatKind {
     const val DIRECT_TEXT: Int = 2
     const val TYPING: Int = 3
     const val CHANNEL_TEXT: Int = 4
+    const val DIRECT_REACTION: Int = 5  // encrypted emoji reaction to one node's message (§8.1)
+    const val CHANNEL_REACTION: Int = 6 // channel-secret emoji reaction to a channel message (§8.2)
 }
 
 /**

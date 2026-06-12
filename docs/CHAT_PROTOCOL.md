@@ -11,7 +11,7 @@ Here is `CHAT_PROTOCOL.md` as plain text:
 
 This document specifies the first interoperable BLEEdge Chat payload format. It
 covers public text messages, encrypted direct messages, ephemeral typing
-notifications, and encrypted group channels.
+notifications, encrypted group channels, and emoji reactions.
 
 Channel messages are native BLEEdge Chat messages. Their encrypted payload layout
 intentionally mirrors MeshCore `GRP_TXT`, allowing implementations to reuse the
@@ -31,7 +31,9 @@ BLE GATT frame
         ├── PUBLIC_TEXT
         ├── DIRECT_TEXT
         ├── TYPING
-        └── CHANNEL_TEXT
+        ├── CHANNEL_TEXT
+        ├── DIRECT_REACTION
+        └── CHANNEL_REACTION
 ```
 
 A BLEEdge Chat message is carried inside a BLEEdge datagram with:
@@ -68,10 +70,12 @@ Message kinds:
 
 | Value | Name           | Purpose                                                       |
 | ----: | -------------- | ------------------------------------------------------------- |
-|     1 | `PUBLIC_TEXT`  | Signed plaintext message broadcast within the BLEEdge scope   |
-|     2 | `DIRECT_TEXT`  | Authenticated encrypted message sent to one BLEEdge node      |
-|     3 | `TYPING`       | Signed ephemeral typing notification sent to one BLEEdge node |
-|     4 | `CHANNEL_TEXT` | MeshCore-compatible encrypted group-channel message           |
+|     1 | `PUBLIC_TEXT`      | Signed plaintext message broadcast within the BLEEdge scope   |
+|     2 | `DIRECT_TEXT`      | Authenticated encrypted message sent to one BLEEdge node      |
+|     3 | `TYPING`           | Signed ephemeral typing notification sent to one BLEEdge node |
+|     4 | `CHANNEL_TEXT`     | MeshCore-compatible encrypted group-channel message           |
+|     5 | `DIRECT_REACTION`  | Encrypted emoji reaction to a direct message (§8.1)           |
+|     6 | `CHANNEL_REACTION` | Channel-secret emoji reaction to a channel message (§8.2)     |
 
 Unknown message kinds MUST be ignored after local delivery. Relays MUST continue
 to forward unknown chat payloads according to the outer BLEEdge routing rules.
@@ -528,14 +532,112 @@ payload  = complete encoded MeshCore packet
 
 ---
 
-## 8. Delivery semantics
+## 8. Emoji reactions
 
-| Message kind   | Outer destination | Encryption  | Authentication    | `ACK_REQUESTED` |
-| -------------- | ----------------- | ----------- | ----------------- | --------------- |
-| `PUBLIC_TEXT`  | broadcast         | no          | Ed25519 signature | no              |
-| `DIRECT_TEXT`  | one NodeID        | AES-256-GCM | AEAD              | recommended     |
-| `TYPING`       | one NodeID        | no          | Ed25519 signature | no              |
-| `CHANNEL_TEXT` | broadcast         | AES-128-ECB | shared-secret MAC | no              |
+A reaction adds or removes one emoji on a previously delivered message. A reaction
+references its target by the target message's **application message id**
+(`target_ref`, a UTF-8 string). In this implementation that id is the lowercase
+hex of the target's BLEEdge datagram id for native messages; bridged
+MeshCore-origin channel messages use their deterministic content id. Every node
+that has the target derives the same id, so reactions converge.
+
+A reaction is a small piece of metadata, not a message. Receivers MUST NOT render
+a reaction as a chat bubble, persist it as message history, retransmit it on
+failure, or raise a notification for it.
+
+Reaction state per `(target_ref, author)` is **last-writer-wins**: a node has at
+most one reaction emoji per target. Re-sending the same emoji with `remove = true`
+clears it; sending a different emoji replaces it. The author identity is the outer
+BLEEdge `source` NodeID. As with channel text (§7.6), a channel reaction's author
+is transport metadata, not an individual cryptographic signature.
+
+```text
+EMOJI_MAX_BYTES = 64
+```
+
+A receiver MUST drop a reaction whose UTF-8 emoji exceeds `EMOJI_MAX_BYTES`.
+
+### 8.1 `DIRECT_REACTION`
+
+A `DIRECT_REACTION` reacts to a one-to-one `DIRECT_TEXT`. It reuses the
+`DIRECT_TEXT` envelope, X25519 conversion (§5.4) and pairwise key (§5.5)
+unchanged; only the AAD label and message kind differ, so a `DIRECT_TEXT`
+ciphertext can never be replayed as a reaction.
+
+Outer datagram: `protocol = BLEEDGE_CHAT`, `kind = DIRECT_REACTION`,
+`destination = recipient NodeID`. It SHOULD NOT request an ACK and is not
+retried.
+
+Encrypted body (identical shape to §5.2):
+
+| Key | Field               | Type      | Required | Notes                              |
+| --: | ------------------- | --------- | -------- | ---------------------------------- |
+|   1 | `sender_public_key` | bytes(32) | yes      | Sender Ed25519 public key          |
+|   2 | `nonce`             | bytes(12) | yes      | Fresh random AES-GCM nonce         |
+|   3 | `ciphertext`        | bytes     | yes      | AES-256-GCM, 16-byte tag appended  |
+
+Plaintext CBOR map:
+
+| Key | Field        | Type  | Required | Notes                            |
+| --: | ------------ | ----- | -------- | -------------------------------- |
+|   1 | `sent_at`    | int64 | yes      | Unix seconds or `0`              |
+|   2 | `target_ref` | text  | yes      | Target message application id    |
+|   3 | `emoji`      | text  | yes      | UTF-8 emoji (≤ `EMOJI_MAX_BYTES`) |
+|   4 | `remove`     | bool  | yes      | `true` clears, `false` sets      |
+
+The additional authenticated data is the §5.7 layout with the label
+`ascii("BLEEDGE-CHAT-REACTION-AAD-V1\0")` and `kind = DIRECT_REACTION (= 5)`.
+
+### 8.2 `CHANNEL_REACTION`
+
+A `CHANNEL_REACTION` reacts to a `CHANNEL_TEXT`. It is broadcast and
+membership-authenticated with the channel secret using the **same**
+`channel_hash || mac || AES-128-ECB` envelope as §7.4, but its encrypted
+plaintext is a native length-prefixed CBOR map, **not** MeshCore `GRP_TXT` text.
+It is therefore a BLEEdge-native extension that gateways do **not** translate to
+MeshCore (§7.7 maps `CHANNEL_TEXT` only).
+
+Outer datagram: `protocol = BLEEDGE_CHAT`, `kind = CHANNEL_REACTION`,
+`destination = broadcast`, no ACK.
+
+Body:
+
+| Key | Field             | Type  | Required | Notes                                   |
+| --: | ----------------- | ----- | -------- | --------------------------------------- |
+|   1 | `channel_payload` | bytes | yes      | `channel_hash || mac || ciphertext`     |
+
+The ciphertext is `AES-128-ECB(secret, plaintext)` where:
+
+```text
+plaintext = cbor_len[2 LE] || reaction_cbor || zero_padding
+```
+
+`reaction_cbor` is a CBOR map:
+
+| Key | Field          | Type  | Required | Notes                            |
+| --: | -------------- | ----- | -------- | -------------------------------- |
+|   1 | `sent_at`      | int64 | yes      | Unix seconds or `0`              |
+|   2 | `target_ref`   | text  | yes      | Target message application id    |
+|   3 | `emoji`        | text  | yes      | UTF-8 emoji (≤ `EMOJI_MAX_BYTES`) |
+|   4 | `remove`       | bool  | yes      | `true` clears, `false` sets      |
+|   5 | `sender_label` | text  | yes      | Claimed display label (a hint)   |
+
+A receiver matches the one-byte `channel_hash`, verifies the two-byte MAC against
+each joined candidate secret (§7.5), decrypts, reads `cbor_len`, and decodes that
+many CBOR bytes.
+
+---
+
+## 9. Delivery semantics
+
+| Message kind       | Outer destination | Encryption  | Authentication    | `ACK_REQUESTED` |
+| ------------------ | ----------------- | ----------- | ----------------- | --------------- |
+| `PUBLIC_TEXT`      | broadcast         | no          | Ed25519 signature | no              |
+| `DIRECT_TEXT`      | one NodeID        | AES-256-GCM | AEAD              | recommended     |
+| `TYPING`           | one NodeID        | no          | Ed25519 signature | no              |
+| `CHANNEL_TEXT`     | broadcast         | AES-128-ECB | shared-secret MAC | no              |
+| `DIRECT_REACTION`  | one NodeID        | AES-256-GCM | AEAD              | no              |
+| `CHANNEL_REACTION` | broadcast         | AES-128-ECB | shared-secret MAC | no              |
 
 A BLEEdge ACK confirms that the outer direct-message datagram reached the
 recipient's BLEEdge node. It does not confirm:
@@ -548,14 +650,14 @@ Read receipts are not part of chat protocol version 1.
 
 ---
 
-## 9. Security considerations
+## 10. Security considerations
 
-### 9.1 Public messages
+### 10.1 Public messages
 
 `PUBLIC_TEXT` is signed but readable by every node within the reachable BLEEdge
 scope.
 
-### 9.2 Direct messages
+### 10.2 Direct messages
 
 `DIRECT_TEXT` provides authenticated pairwise encryption using converted static
 identity keys and AES-256-GCM.
@@ -567,7 +669,7 @@ direct messages involving that node.
 A later chat protocol version may introduce ephemeral keys or a ratcheting
 session protocol without changing the BLEEdge routing engine.
 
-### 9.3 Channel messages
+### 10.3 Channel messages
 
 `CHANNEL_TEXT` provides confidentiality and membership authentication using a
 shared channel secret. It does not authenticate the individual human sender.
@@ -577,13 +679,21 @@ messages.
 AES-128-ECB is retained here only for MeshCore payload compatibility. It MUST NOT
 be reused for `DIRECT_TEXT` or new non-compatible message formats.
 
-### 9.4 Metadata exposure
+### 10.4 Reactions
+
+`DIRECT_REACTION` inherits the `DIRECT_TEXT` security properties.
+`CHANNEL_REACTION` inherits the `CHANNEL_TEXT` properties: any channel member can
+forge a reaction under any `sender_label`, and `target_ref` is not proof that the
+referenced message exists. Reactions are convenience metadata and MUST NOT be
+treated as authenticated acknowledgements.
+
+### 10.5 Metadata exposure
 
 BLEEdge routing metadata is visible to relays, including source NodeID,
 destination NodeID, route, TTL, and path. Direct-message text remains encrypted,
 but BLEEdge Chat v1 does not hide the communication graph.
 
-### 9.5 Commands and automation
+### 10.6 Commands and automation
 
 Remote device commands, bots, and automation messages are outside the scope of
 BLEEdge Chat v1. They SHOULD use a separate application payload protocol rather
@@ -591,13 +701,14 @@ than overloading text-message semantics.
 
 ---
 
-## 10. Constants
+## 11. Constants
 
 | Constant                 |                              Value |
 | ------------------------ | ---------------------------------: |
 | `CHAT_PROTOCOL_ID`       |                           `0x0100` |
 | `CHAT_VERSION`           |                                `1` |
 | `MAX_TEXT_BYTES`         |                             `2048` |
+| `EMOJI_MAX_BYTES`        |                               `64` |
 | `DIRECT_NONCE_BYTES`     |                               `12` |
 | `DIRECT_KEY_BYTES`       |                               `32` |
 | `DIRECT_GCM_TAG_BYTES`   |                               `16` |
@@ -611,7 +722,7 @@ than overloading text-message semantics.
 
 ---
 
-## 11. Conformance checklist
+## 12. Conformance checklist
 
 A conforming BLEEdge Chat v1 implementation MUST:
 
@@ -630,5 +741,8 @@ A conforming BLEEdge Chat v1 implementation MUST:
 * [ ] encode `CHANNEL_TEXT.body.channel_payload` using the exact MeshCore-compatible `GRP_TXT` layout;
 * [ ] derive channel secrets and validate channel MACs exactly as specified;
 * [ ] treat channel sender labels as claims rather than individual cryptographic signatures;
-* [ ] keep complete opaque MeshCore packet tunneling available separately through `MESHCORE_PACKET`; and
-* [ ] enforce the 2048-byte UTF-8 text limit.
+* [ ] keep complete opaque MeshCore packet tunneling available separately through `MESHCORE_PACKET`;
+* [ ] reuse the `DIRECT_TEXT` envelope/pairwise key for `DIRECT_REACTION`, binding `kind = 5` in the AAD;
+* [ ] carry `CHANNEL_REACTION` as a native channel payload and never translate it to MeshCore `GRP_TXT`;
+* [ ] treat reactions as last-writer-wins per `(target_ref, author)` metadata that is never persisted as message history; and
+* [ ] enforce the 2048-byte UTF-8 text limit and the 64-byte reaction emoji limit.

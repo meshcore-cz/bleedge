@@ -103,4 +103,49 @@ class ChatTest {
         val d = ChatChannel.open(secret, payload)
         assertEquals("anyone out there?", d!!.text)
     }
+
+    @Test fun directReactionRoundTrip() {
+        val alice = id(30)
+        val bob = id(31)
+        val c = ChatContext(Datagram.newDatagramId(), alice.nodeId, bob.nodeId)
+        val payload = ChatDirectReaction.seal(alice, bob.publicKey, c, "a1b2c3", "❤️", remove = false, sentAt = 4)
+        assertEquals(ChatKind.DIRECT_REACTION, Chat.peekKind(payload))
+        val opened = ChatDirectReaction.open(bob, payload, c)
+        assertNotNull(opened)
+        assertEquals("a1b2c3", opened!!.targetRef)
+        assertEquals("❤️", opened.emoji)
+        assertEquals(false, opened.remove)
+        assertEquals(4L, opened.sentAt)
+        assertArrayEquals(alice.publicKey, opened.senderPublicKey)
+    }
+
+    @Test fun directReactionAadBindsToDatagramId() {
+        val alice = id(30)
+        val bob = id(31)
+        val c = ChatContext(Datagram.newDatagramId(), alice.nodeId, bob.nodeId)
+        val payload = ChatDirectReaction.seal(alice, bob.publicKey, c, "x", "👍", remove = false, sentAt = 0)
+        // replay under a different datagram id must fail AEAD auth
+        assertNull(ChatDirectReaction.open(bob, payload, ChatContext(Datagram.newDatagramId(), alice.nodeId, bob.nodeId)))
+    }
+
+    @Test fun channelReactionRoundTrip() {
+        val secret = ChatChannel.namedSecret("rock climbers")
+        val payload = ChatChannelReaction.build(secret, "bob", "dg-7f", "😂", remove = false, sentAt = 8)
+        assertEquals(ChatKind.CHANNEL_REACTION, Chat.peekKind(payload))
+        val d = ChatChannelReaction.open(secret, payload)
+        assertNotNull(d)
+        assertEquals("dg-7f", d!!.targetRef)
+        assertEquals("😂", d.emoji)
+        assertEquals("bob", d.senderLabel)
+        assertTrue(!d.remove)
+        // wrong secret -> null (hash mismatch / MAC fail)
+        assertNull(ChatChannelReaction.open(ChatChannel.namedSecret("other"), payload))
+    }
+
+    @Test fun channelReactionRemoveFlag() {
+        val secret = ChatChannel.PUBLIC_SECRET
+        val payload = ChatChannelReaction.build(secret, "alice", "dg-9", "👎", remove = true, sentAt = 0)
+        val d = ChatChannelReaction.open(secret, payload)
+        assertTrue(d!!.remove)
+    }
 }

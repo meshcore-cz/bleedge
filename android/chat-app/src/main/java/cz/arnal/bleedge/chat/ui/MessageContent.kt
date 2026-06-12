@@ -38,11 +38,12 @@ fun MessageContent(
     enableMentions: Boolean,
     onMentionClick: (String) -> Unit,
     modifier: Modifier = Modifier,
+    mentionResolved: (String) -> Boolean = { true },
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val codeBg = MaterialTheme.colorScheme.surfaceVariant
     val onCodeBg = MaterialTheme.colorScheme.onSurfaceVariant
-    val style = Inline(accent, codeBg, onCodeBg, enableMentions, onMentionClick)
+    val style = Inline(accent, codeBg, onCodeBg, enableMentions, onMentionClick, mentionResolved)
 
     val blocks = remember(text) { splitBlocks(text) }
     Column(modifier) {
@@ -143,6 +144,7 @@ private class Inline(
     val onCodeBg: Color,
     val enableMentions: Boolean,
     val onMentionClick: (String) -> Unit,
+    val mentionResolved: (String) -> Boolean,
 )
 
 private val bareUrlRe = Regex("""https?://\S+""")
@@ -169,9 +171,13 @@ private fun AnnotatedString.Builder.appendInline(s: String, ctx: Inline) {
                 val close = s.indexOf(']', i + 2)
                 if (close > i) {
                     val name = s.substring(i + 2, close)
+                    // A mention that matches a saved contact is a real link (accent); one we can't
+                    // resolve — e.g. a bridged MeshCore name not in our contacts — is muted grey so
+                    // it doesn't read as an active link (tapping still explains it).
+                    val color = if (ctx.mentionResolved(name)) ctx.accent else ctx.onCodeBg
                     val link = LinkAnnotation.Clickable(
                         "mention",
-                        TextLinkStyles(SpanStyle(background = ctx.accent.copy(alpha = 0.18f), color = ctx.accent, fontWeight = FontWeight.Medium)),
+                        TextLinkStyles(SpanStyle(background = color.copy(alpha = 0.18f), color = color, fontWeight = FontWeight.Medium)),
                     ) { ctx.onMentionClick(name) }
                     withLink(link) { append("@$name") }
                     i = close + 1

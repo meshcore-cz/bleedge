@@ -57,6 +57,19 @@ data class DiscoveredContact(
     val firstSeenMs: Long = 0L,
 )
 
+/**
+ * One emoji reaction by one author on one message. Keyed by ([messageId], [authorHex]) so a person
+ * has at most one reaction per message (reacting again replaces it; the same emoji again removes
+ * it). [messageId] is the target [Message.id]; [authorHex] is the reactor's node id hex.
+ */
+@Entity(tableName = "reactions", primaryKeys = ["messageId", "authorHex"])
+data class Reaction(
+    val messageId: String,
+    val authorHex: String,
+    val emoji: String,
+    val timestampMs: Long,
+)
+
 /** Outgoing-message delivery state. */
 object MsgStatus {
     const val SENDING = 0
@@ -77,6 +90,10 @@ data class Contact(
     // A user-chosen local alias (from Rename). Overrides the node's wire/derived name in all
     // views; empty means "use the node's advertised name". Distinct from [description].
     val localName: String = "",
+    // True if this contact was added from a bridged MeshCore node. Such nodes aren't directly
+    // reachable over BLEEdge (DMs to them will fail), but they're kept as full contacts so their
+    // name resolves and they appear in Chats. Surfaced as a "MeshCore" label on the profile.
+    val isMeshCore: Boolean = false,
 )
 
 /**
@@ -99,6 +116,10 @@ data class Message(
     val routeHex: String = "",
     val read: Boolean = false,
     val viaMeshCore: Boolean = false, // true if this message arrived over the MeshCore bridge
+    // For a bridged channel message, the BLEEdge node that injected it onto the mesh (the
+    // "bridge"). The real author is unverifiable — only its declared name is known, in
+    // [senderName] — so [senderHex] is left blank for bridged messages.
+    val bridgeHex: String = "",
     // MeshCore carrier details (only set when viaMeshCore), shown in message details.
     val meshCoreType: String = "",
     val meshCoreRoute: String = "",

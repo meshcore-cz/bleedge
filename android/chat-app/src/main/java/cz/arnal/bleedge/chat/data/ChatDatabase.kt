@@ -10,8 +10,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // v3: NodeIDs widened 8→10 bytes (protocol v3), so old peer/contact ids are stale —
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
-    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class],
-    version = 8,
+    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class],
+    version = 10,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -39,12 +39,33 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v8→v9: mark contacts that came from a bridged MeshCore node, and record which BLEEdge
+        // node bridged a channel message. Both additive — migrate in place.
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE contacts ADD COLUMN isMeshCore INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE messages ADD COLUMN bridgeHex TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        // v9→v10: add the reactions table (emoji reactions on messages). Additive.
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `reactions` (" +
+                        "`messageId` TEXT NOT NULL, `authorHex` TEXT NOT NULL, " +
+                        "`emoji` TEXT NOT NULL, `timestampMs` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`messageId`, `authorHex`))"
+                )
+            }
+        }
+
         fun get(context: Context): ChatDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 "bleedge_chat.db",
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .fallbackToDestructiveMigration()
                 .build().also { instance = it }
         }

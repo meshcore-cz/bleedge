@@ -155,6 +155,9 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenConversation = { openProfile = null; openPeer = it },
                 onTrace = { openTrace = it },
                 onOpenProfile = { openProfile = it },
+                // Profile (depth 2) outranks Settings (depth 1) in `top`, so close the profile
+                // first; otherwise Settings would never surface.
+                onOpenSettings = { openProfile = null; showSettings = true },
             )
             is Dest.Conversation -> ConversationScreen(
                 vm, dest.peer,

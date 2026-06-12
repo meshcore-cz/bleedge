@@ -1,5 +1,10 @@
 package cz.arnal.bleedge.chat.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -15,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -54,6 +60,7 @@ import cz.arnal.bleedge.chat.ConnState
 import cz.arnal.bleedge.chat.data.ChannelKind
 import cz.arnal.bleedge.chat.data.Message
 import cz.arnal.bleedge.chat.data.MsgStatus
+import cz.arnal.bleedge.service.DmDelivery
 import cz.arnal.bleedge.service.RSSI_UNKNOWN
 import cz.arnal.bleedge.chat.data.isChannelPeer
 import java.text.SimpleDateFormat
@@ -116,6 +123,14 @@ private val avatarColors = listOf(
 val LocalAvatarStyle = staticCompositionLocalOf { AvatarStyle.IDENTICON }
 
 /**
+ * A stable, distinct color for a "virtual" identity — a bridged MeshCore channel author we know
+ * only by a declared name (no public key). Keyed on the name so the same author reads the same
+ * color, visibly different from our own primary-colored, verified senders.
+ */
+fun virtualNameColor(name: String): Color =
+    avatarColors[(name.lowercase().hashCode().ushr(1)) % avatarColors.size]
+
+/**
  * Avatar for a contact/channel. When the identicon style is on AND an [identiconKey] is given
  * (a contact's public key), draws a deterministic identicon from that key; otherwise a colored
  * initials circle. Channels (no public key) always fall back to initials.
@@ -132,6 +147,24 @@ fun Avatar(seed: String, label: String, size: Int = 44, identiconKey: String? = 
         Box(base.background(color), contentAlignment = Alignment.Center) {
             Text(initials, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size / 2.6).sp)
         }
+    }
+}
+
+/** Avatar for the "Note to Self" conversation: a note glyph on a tinted circle (Signal-style). */
+@Composable
+fun NoteToSelfAvatar(size: Int = 44, onClick: (() -> Unit)? = null) {
+    Box(
+        Modifier.size(size.dp).clip(CircleShape)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Default.Description,
+            contentDescription = "Note to Self",
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size((size * 0.55).dp),
+        )
     }
 }
 
@@ -237,6 +270,33 @@ fun DeliveryTick(status: Int) {
     Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
 }
 
+/**
+ * Delivery tick for an outgoing DM that pulses while we're still waiting for the recipient's ACK
+ * (i.e. [status] is SENT and a live [delivery] is in flight, not yet acked/failed) — so a single
+ * checkmark visibly signals "in progress". Otherwise renders the static [DeliveryTick].
+ */
+@Composable
+fun AnimatedDeliveryTick(status: Int, delivery: DmDelivery?) {
+    val awaiting = status == MsgStatus.SENT && delivery != null && !delivery.acked && !delivery.failed
+    if (!awaiting) {
+        DeliveryTick(status)
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "delivery")
+    val alpha by transition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 700), RepeatMode.Reverse),
+        label = "tickAlpha",
+    )
+    Icon(
+        Icons.Default.Done,
+        contentDescription = "Awaiting acknowledgement",
+        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+        modifier = Modifier.size(15.dp),
+    )
+}
+
 private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 private val dayFmt = SimpleDateFormat("MMM d", Locale.getDefault())
 private val fullDayFmt = SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
@@ -247,6 +307,15 @@ fun formatRelative(ts: Long): String {
     val now = System.currentTimeMillis()
     val sameDay = dayFmt.format(Date(ts)) == dayFmt.format(Date(now))
     return if (sameDay) timeFmt.format(Date(ts)) else dayFmt.format(Date(ts))
+}
+
+/**
+ * Like [formatRelative] but renders the last hour as a relative age ("now", "Ns ago", "Nm ago"),
+ * falling back to the clock (same day) or date. Used for recently discovered contacts on Explore.
+ */
+fun formatRelativeAge(ts: Long): String {
+    val diff = System.currentTimeMillis() - ts
+    return if (diff in 0 until 3_600_000) formatMessageTime(ts) else formatRelative(ts)
 }
 
 /**
@@ -296,34 +365,42 @@ fun MessageDetailsSheet(
     val repeatSamples = floodRepeats[msg.id].orEmpty()
     val dmDeliveries by vm.dmDeliveries.collectAsState()
     val delivery = dmDeliveries[msg.id]
+    val isChannel = isChannelPeer(msg.peerHex)
+    val channelEchoed = isChannel && repeatSamples.isNotEmpty()
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Message details", style = MaterialTheme.typography.titleMedium)
-            // For a channel message, surface the sender and let it open their profile.
-            if (isChannelPeer(msg.peerHex) && msg.senderHex.isNotBlank()) {
-                val senderProfile by remember(msg.senderHex) { vm.profileFor(msg.senderHex) }.collectAsState()
-                val senderLabel = senderProfile.name.ifBlank {
-                    msg.senderName.ifBlank { vm.nameForHex(msg.senderHex) }
+            // A bridged MeshCore channel author is unverifiable — we only know its declared name.
+            // Show the bridge node (real, tappable) and the declared sender (linked only if its
+            // name matches a saved contact) separately, so they're not conflated.
+            if (isChannel && msg.viaMeshCore) {
+                if (msg.bridgeHex.isNotBlank()) {
+                    SenderRow("Sender (bridge)", msg.bridgeHex, vm, onOpenProfile)
                 }
-                val senderIdenticonKey = senderProfile.pubKeyHex.ifBlank { null }
+                val declaredHex = msg.senderName.takeIf { it.isNotBlank() }?.let { vm.nodeHexForName(it) }
                 Row(
                     Modifier.fillMaxWidth()
-                        .then(if (onOpenProfile != null) Modifier.clickable { onOpenProfile(msg.senderHex) } else Modifier),
+                        .then(if (declaredHex != null && onOpenProfile != null) Modifier.clickable { onOpenProfile(declaredHex) } else Modifier),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Sender", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(seed = msg.senderHex, label = senderLabel, size = 28, identiconKey = senderIdenticonKey)
-                        Spacer(Modifier.size(8.dp))
-                        Text(
-                            senderLabel,
-                            fontWeight = FontWeight.Medium,
-                            color = if (onOpenProfile != null) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
+                    Text("Declared sender", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        msg.senderName.ifBlank { "—" },
+                        fontWeight = FontWeight.Medium,
+                        color = if (declaredHex != null) MaterialTheme.colorScheme.primary
+                        else virtualNameColor(msg.senderName),
+                    )
                 }
+                Text(
+                    if (declaredHex != null) "Name matches a saved contact (still unverified — no public key)."
+                    else "Unverified — bridged names carry no public key, so this can't be linked.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (isChannel && msg.senderHex.isNotBlank()) {
+                // Native channel message — the originating node is a real, verified identity.
+                SenderRow("Sender", msg.senderHex, vm, onOpenProfile)
             }
             DetailRow("Direction", if (msg.incoming) "Incoming" else "Outgoing")
             if (msg.viaMeshCore) {
@@ -337,16 +414,21 @@ fun MessageDetailsSheet(
             }
             DetailRow("Time", "${dayFmt.format(Date(msg.timestampMs))} ${formatClock(msg.timestampMs)}")
             if (!msg.incoming) {
-                DetailRow("Status", when (msg.status) {
-                    MsgStatus.SENDING -> "Sending…"
-                    MsgStatus.SENT -> buildString {
+                DetailRow("Status", when {
+                    // Channels are broadcast and never ACKed — hearing our own message echoed back
+                    // is the only confirmation it propagated, so treat an echo as "delivered".
+                    isChannel -> if (channelEchoed)
+                        "Delivered (heard echoed ${repeatSamples.size}×)"
+                    else "Sent to mesh (no echo yet)"
+                    msg.status == MsgStatus.SENDING -> "Sending…"
+                    msg.status == MsgStatus.SENT -> buildString {
                         append(if (delivery != null && !delivery.acked && !delivery.failed)
                             "Sent — try ${delivery.attemptsSent} of ${delivery.maxTries}, awaiting ACK"
                         else "Sent to mesh")
                         if (repeatSamples.isNotEmpty())
                             append(" · ${repeatSamples.size} repeat${if (repeatSamples.size == 1) "" else "s"} heard")
                     }
-                    MsgStatus.DELIVERED ->
+                    msg.status == MsgStatus.DELIVERED ->
                         if (delivery != null && delivery.attemptsSent > 1)
                             "Delivered (ACK after ${delivery.attemptsSent} tries)"
                         else "Delivered (ACK received)"
@@ -355,7 +437,7 @@ fun MessageDetailsSheet(
                         else "Failed to send"
                 })
                 // Retry detail for a DM that needed (or is making) more than one attempt.
-                if (delivery != null && delivery.maxTries > 1) {
+                if (!isChannel && delivery != null && delivery.maxTries > 1) {
                     DetailRow("Delivery attempts", "${delivery.attemptsSent} of ${delivery.maxTries}")
                 }
             }
@@ -364,7 +446,13 @@ fun MessageDetailsSheet(
             // sender/recipient endpoints aren't shown.
             val relayHops = msg.routeHex.split(",").filter { it.isNotBlank() }.dropLast(1)
             DetailRow("Delivery", when {
-                msg.routeHex.isBlank() -> if (msg.incoming) "—" else "Awaiting confirmation"
+                msg.routeHex.isBlank() -> when {
+                    msg.incoming -> "—"
+                    isChannel -> if (channelEchoed)
+                        "Echoed by ${repeatSamples.size} node${if (repeatSamples.size == 1) "" else "s"}"
+                    else "Broadcast — no echo yet"
+                    else -> "Awaiting confirmation"
+                }
                 relays == 0 -> "Direct (no relays)"
                 else -> "$relays relay${if (relays == 1) "" else "s"}"
             })
@@ -400,6 +488,31 @@ fun MessageDetailsSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+/** A sender/bridge row in message details: avatar + name, tappable to open the node's profile. */
+@Composable
+private fun SenderRow(label: String, nodeHex: String, vm: ChatViewModel, onOpenProfile: ((String) -> Unit)?) {
+    val profile by remember(nodeHex) { vm.profileFor(nodeHex) }.collectAsState()
+    val name = profile.name.ifBlank { vm.nameForHex(nodeHex) }
+    Row(
+        Modifier.fillMaxWidth()
+            .then(if (onOpenProfile != null) Modifier.clickable { onOpenProfile(nodeHex) } else Modifier),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Avatar(seed = nodeHex, label = name, size = 28, identiconKey = profile.pubKeyHex.ifBlank { null })
+            Spacer(Modifier.size(8.dp))
+            Text(
+                name,
+                fontWeight = FontWeight.Medium,
+                color = if (onOpenProfile != null) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurface,
+            )
         }
     }
 }

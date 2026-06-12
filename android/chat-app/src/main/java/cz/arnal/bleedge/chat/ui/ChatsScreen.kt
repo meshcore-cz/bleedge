@@ -127,6 +127,7 @@ fun ChatsScreen(
                 items(visible, key = { it.peerHex }) { item ->
                     ChatRow(
                         item,
+                        isSelf = item.peerHex == myNode.toHex(),
                         onClick = { onOpenConversation(item.peerHex) },
                         onAvatarClick = { onOpenProfile(item.peerHex) },
                     )
@@ -165,17 +166,21 @@ fun ChatsScreen(
 
 /** A merged-list row: a direct conversation or a channel (selected by [ChatListItem.isChannel]). */
 @Composable
-private fun ChatRow(item: ChatListItem, onClick: () -> Unit, onAvatarClick: () -> Unit) {
+private fun ChatRow(item: ChatListItem, isSelf: Boolean, onClick: () -> Unit, onAvatarClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(
-            seed = item.peerHex,
-            label = item.title,
-            identiconKey = if (item.isChannel) null else item.pubKeyHex,
-            onClick = onAvatarClick,
-        )
+        if (isSelf) {
+            NoteToSelfAvatar(onClick = onAvatarClick)
+        } else {
+            Avatar(
+                seed = item.peerHex,
+                label = item.title,
+                identiconKey = if (item.isChannel) null else item.pubKeyHex,
+                onClick = onAvatarClick,
+            )
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -193,7 +198,7 @@ private fun ChatRow(item: ChatListItem, onClick: () -> Unit, onAvatarClick: () -
                     )
                 }
             }
-            if (!item.isChannel) {
+            if (!item.isChannel && !isSelf) {
                 val pub = formatPubKey(item.pubKeyHex)
                 if (pub.isNotEmpty()) {
                     Text(
