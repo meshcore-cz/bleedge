@@ -53,8 +53,6 @@ fun ChatsScreen(
     onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
-    onOpenTrace: ((String) -> Unit)? = null,
-    onOpenRxLog: (() -> Unit)? = null,
 ) {
     val conversations by vm.conversations.collectAsState()
     val myNode by vm.nodeId.collectAsState()
@@ -74,9 +72,9 @@ fun ChatsScreen(
             TopAppBar(
                 navigationIcon = {
                     // Tapping your own avatar opens your profile (Settings is in the ⋮ menu).
-                    IconButton(onClick = { onOpenProfile(myNode.toHexString()) }) {
+                    IconButton(onClick = { onOpenProfile(myNode.toHex()) }) {
                         Avatar(
-                            seed = myNode.toHexString(),
+                            seed = myNode.toHex(),
                             label = myName.ifBlank { "Me" },
                             identiconKey = myPubKeyHex,
                             size = 32,
@@ -91,7 +89,7 @@ fun ChatsScreen(
                     }
                 },
                 actions = {
-                    ConnectionStatusButton(vm, onOpenTrace = onOpenTrace, onOpenRxLog = onOpenRxLog)
+                    ConnectionStatusButton(vm)
                     IconButton(onClick = {
                         searching = !searching
                         if (!searching) query = ""
