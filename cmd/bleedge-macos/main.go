@@ -97,7 +97,7 @@ func main() {
 Usage:
   bleedge-macos [--seed-hex <hex>] [--description <str>] [--allow-peer <id,...>] [--verbose]
   bleedge-macos --bot <script.ts> [--bun <path>] [--channels <name,...>]   # run as a bot driven by a Bun script
-  bleedge-macos --meshcore-bridge [--meshcore-socket <path>]               # bridge MeshCore adverts into the BLEEdge mesh
+  bleedge-macos --meshcore-bridge [--meshcore-socket <path>]               # bridge MeshCore packets into the BLEEdge mesh
 
 Interactive commands (type and press Enter):
   <text>             broadcast a message on the public channel
@@ -116,8 +116,8 @@ Bot mode (--bot): the node runs headless and forwards chat messages to a Bun
     bleedge-macos --bot bots/echo-bot.ts --channels "Public,dev"
 
 Bridge mode (--meshcore-bridge): taps a running meshcore-go backend daemon over
-  its Unix-socket IPC (watch_rf), and re-floods every MeshCore ADVERT it hears
-  into the BLEEdge mesh as an opaque PayloadTypeMeshCoreRaw packet. Phase 1 is
+  its Unix-socket IPC (watch_rf), and re-floods every MeshCore packet it hears
+  into the BLEEdge mesh as an opaque v3 MESHCORE_PACKET datagram. Phase 1 is
   one-way (MeshCore -> BLEEdge). Requires the meshcore-go backend running with
   RF logging enabled. Socket defaults to MC_BACKEND_SOCKET or
   <cache>/mc/backend.sock; override with --meshcore-socket.
@@ -190,6 +190,12 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 		default:
 		}
 	}
+	emitBridge := func(line string) {
+		select {
+		case uiEvents <- uiEvent{line: line, kind: uiEventBridge}:
+		default:
+		}
+	}
 	logFn := func(msg string) {
 		if !verbose {
 			return
@@ -241,22 +247,38 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 	errCh := make(chan error, 1)
 	go func() { errCh <- node.Run(ctx) }()
 
-	// MeshCore bridge: tap the meshcore-go backend and re-flood adverts.
+	// MeshCore bridge: tap the meshcore-go backend and re-flood packets.
 	if meshcoreBridge {
 		bridgeLog := func(s string) {
 			if headless {
 				fmt.Fprintln(os.Stderr, s)
 				return
 			}
-			emitUI(fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), s))
+			emitBridge(fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), s))
 		}
 		br := mcbridge.New(mcbridge.Config{Socket: meshcoreSocket, Log: bridgeLog})
-		go br.Run(ctx, func(a mcbridge.Advert) {
-			if err := node.SendMeshCoreRaw(a.Bytes); err != nil {
-				bridgeLog(fmt.Sprintf("meshcore bridge: forward failed: %v", err))
-				return
+		go br.Run(ctx, func(pkt mcbridge.Packet) {
+			switch pkt.Mode {
+			case mcbridge.ForwardFlood:
+				if err := node.SendMeshCoreRaw(pkt.Bytes); err != nil {
+					bridgeLog(fmt.Sprintf("meshcore bridge: flood failed: %v packet=%s", err, pkt.Summary()))
+					return
+				}
+				bridgeLog("meshcore bridge: flooded " + pkt.Summary())
+			case mcbridge.ForwardDirect:
+				dst, ok := node.MeshCoreNeighborForHash(pkt.TargetHash)
+				if !ok {
+					bridgeLog("meshcore bridge: skip direct " + pkt.Summary() + " reason=no reachable BLEEdge neighbor for MeshCore hash")
+					return
+				}
+				if err := node.SendMeshCoreRawTo(dst, pkt.Bytes); err != nil {
+					bridgeLog(fmt.Sprintf("meshcore bridge: direct failed dst=%s err=%v packet=%s", dst, err, pkt.Summary()))
+					return
+				}
+				bridgeLog(fmt.Sprintf("meshcore bridge: direct dst=%s %s", dst, pkt.Summary()))
+			default:
+				bridgeLog("meshcore bridge: skip unknown forwarding mode " + pkt.Summary())
 			}
-			bridgeLog(fmt.Sprintf("meshcore bridge: forwarded advert (%d bytes, rssi=%d) -> BLEEdge", len(a.Bytes), a.RSSI))
 		})
 	}
 

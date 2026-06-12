@@ -3,10 +3,10 @@
 // MeshCore over-the-air packets into a BLEEdge mesh.
 //
 // Phase 1 is deliberately dumb: it subscribes to the backend's `watch_rf`
-// stream (raw OTA bytes), keeps only ADVERT packets, and hands the raw bytes
-// to a forward callback. The BLEEdge side wraps them opaquely in a
-// PayloadTypeMeshCoreRaw DATA packet and floods them — no node decodes the
-// MeshCore payload, it is carried verbatim.
+// stream (raw OTA bytes), decodes each complete MeshCore packet, and hands only
+// packets that should propagate to a forward callback. The BLEEdge side wraps
+// each packet opaquely in a v3 MESHCORE_PACKET datagram; BLEEdge routing never
+// decodes the inner MeshCore payload.
 //
 // The IPC wire format is meshcore-go's own newline-JSON request/response
 // protocol (see meshcore-go backend/client.go). We re-implement only the tiny
@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -25,29 +26,9 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-)
 
-// MeshCore OTA header layout (meshpkt/packet.go):
-//
-//	bits 1-0  route type
-//	bits 5-2  payload type (4 bits)
-//	bits 7-6  payload version
-//
-// We only care about the payload type, and only about ADVERT.
-const (
-	payloadTypeMask   = 0x0F
-	payloadTypeShift  = 2
-	payloadTypeAdvert = 0x04
+	"github.com/meshcore-cz/meshpkt"
 )
-
-// IsAdvert reports whether a raw MeshCore OTA packet is an ADVERT (node
-// advertisement). It is a pure header check — no payload decoding.
-func IsAdvert(otaBytes []byte) bool {
-	if len(otaBytes) == 0 {
-		return false
-	}
-	return (otaBytes[0]>>payloadTypeShift)&payloadTypeMask == payloadTypeAdvert
-}
 
 // rfPacket mirrors meshcore-go's RFPacketReceived JSON shape. Bytes is the raw
 // over-the-air MeshCore packet (companion frame code + signal metadata
@@ -74,12 +55,47 @@ type response struct {
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
-// Advert is a raw MeshCore advertisement observed on the air.
-type Advert struct {
-	Bytes []byte
-	SNR   float64
-	RSSI  int
-	At    time.Time
+type ForwardMode uint8
+
+const (
+	ForwardFlood ForwardMode = iota + 1
+	ForwardDirect
+)
+
+func (m ForwardMode) String() string {
+	switch m {
+	case ForwardFlood:
+		return "flood"
+	case ForwardDirect:
+		return "direct"
+	default:
+		return "unknown"
+	}
+}
+
+// Packet is a decoded raw MeshCore packet observed on the air.
+type Packet struct {
+	Bytes      []byte
+	Mesh       meshpkt.Packet
+	Mode       ForwardMode
+	TargetHash []byte
+	SNR        float64
+	RSSI       int
+	At         time.Time
+}
+
+func (p Packet) Summary() string {
+	target := ""
+	if len(p.TargetHash) > 0 {
+		target = fmt.Sprintf(" target=%s", hex.EncodeToString(p.TargetHash))
+	}
+	transport := ""
+	if p.Mesh.Route.IsTransport() {
+		transport = fmt.Sprintf(" transport=%04x/%04x", p.Mesh.TransportCodes[0], p.Mesh.TransportCodes[1])
+	}
+	return fmt.Sprintf("mode=%s route=%s type=%s len=%d payload=%d hops=%d hash=%d%s%s rssi=%d snr=%.1f",
+		p.Mode, p.Mesh.Route, p.Mesh.Type, len(p.Bytes), len(p.Mesh.Payload),
+		p.Mesh.HopCount(), p.Mesh.PathHashSize, target, transport, p.RSSI, p.SNR)
 }
 
 // Config configures a Bridge.
@@ -90,8 +106,8 @@ type Config struct {
 	// Device optionally selects a specific backend device session (empty =
 	// the daemon's default device).
 	Device string
-	// DedupTTL is how long an identical advert (by content hash) is suppressed
-	// after being forwarded. MeshCore re-floods the same advert repeatedly;
+	// DedupTTL is how long an identical packet (by content hash) is suppressed
+	// after being forwarded. MeshCore re-floods packets repeatedly;
 	// without this the BLEEdge mesh would be spammed. Zero uses 60s.
 	DedupTTL time.Duration
 	// ReconnectDelay is the wait before re-dialing after the stream drops or
@@ -101,7 +117,7 @@ type Config struct {
 	Log func(string)
 }
 
-// Bridge taps the meshcore-go backend and forwards MeshCore adverts.
+// Bridge taps the meshcore-go backend and forwards MeshCore packets.
 type Bridge struct {
 	cfg Config
 
@@ -129,10 +145,10 @@ func (b *Bridge) logf(format string, args ...any) {
 	}
 }
 
-// Run streams adverts from the backend, invoking forward for each new advert,
+// Run streams packets from the backend, invoking forward for each new packet,
 // until ctx is cancelled. It reconnects automatically when the daemon is
 // unavailable or the stream drops. Run only returns when ctx is done.
-func (b *Bridge) Run(ctx context.Context, forward func(Advert)) error {
+func (b *Bridge) Run(ctx context.Context, forward func(Packet)) error {
 	for {
 		if err := b.stream(ctx, forward); err != nil && ctx.Err() == nil {
 			b.logf("meshcore bridge: %v (retrying in %s)", err, b.cfg.ReconnectDelay)
@@ -147,7 +163,7 @@ func (b *Bridge) Run(ctx context.Context, forward func(Advert)) error {
 
 // stream opens one watch_rf subscription and pumps frames until it errors or
 // ctx is cancelled.
-func (b *Bridge) stream(ctx context.Context, forward func(Advert)) error {
+func (b *Bridge) stream(ctx context.Context, forward func(Packet)) error {
 	d := net.Dialer{Timeout: 250 * time.Millisecond}
 	conn, err := d.DialContext(ctx, "unix", b.cfg.Socket)
 	if err != nil {
@@ -180,7 +196,7 @@ func (b *Bridge) stream(ctx context.Context, forward func(Advert)) error {
 		}
 		return fmt.Errorf("watch_rf rejected: %s", ack.Error)
 	}
-	b.logf("meshcore bridge: connected to %s, watching RF for adverts", b.cfg.Socket)
+	b.logf("meshcore bridge: connected to %s, watching RF packets", b.cfg.Socket)
 
 	// Subsequent messages are bare rfPacket frames.
 	for {
@@ -191,17 +207,82 @@ func (b *Bridge) stream(ctx context.Context, forward func(Advert)) error {
 			}
 			return fmt.Errorf("stream closed: %w", err)
 		}
-		if !IsAdvert(pkt.Bytes) {
+		if len(pkt.Bytes) == 0 {
+			continue
+		}
+		mesh, mode, target, reason, err := classify(pkt.Bytes)
+		if err != nil {
+			b.logf("meshcore bridge: drop undecodable packet len=%d rssi=%d: %v", len(pkt.Bytes), pkt.RSSI, err)
+			continue
+		}
+		if mode == 0 {
+			b.logf("meshcore bridge: skip %s: %s", packetSummary(mesh, pkt.Bytes, 0, nil, pkt.RSSI, pkt.SNR), reason)
 			continue
 		}
 		if !b.shouldForward(pkt.Bytes) {
 			continue
 		}
-		forward(Advert{Bytes: pkt.Bytes, SNR: pkt.SNR, RSSI: pkt.RSSI, At: pkt.Timestamp})
+		forward(Packet{Bytes: pkt.Bytes, Mesh: mesh, Mode: mode, TargetHash: target, SNR: pkt.SNR, RSSI: pkt.RSSI, At: pkt.Timestamp})
 	}
 }
 
-// shouldForward returns true if this advert's content has not been forwarded
+func classify(raw []byte) (meshpkt.Packet, ForwardMode, []byte, string, error) {
+	pkt, err := meshpkt.DecodePacket(raw)
+	if err != nil {
+		return meshpkt.Packet{}, 0, nil, "", err
+	}
+	switch pkt.Route {
+	case meshpkt.RouteFlood, meshpkt.RouteTransportFlood:
+		return pkt, ForwardFlood, nil, "", nil
+	case meshpkt.RouteDirect, meshpkt.RouteTransportDirect:
+		target := directTargetHash(pkt)
+		if len(target) == 0 {
+			return pkt, 0, nil, "direct packet has no routable target hash", nil
+		}
+		return pkt, ForwardDirect, target, "", nil
+	default:
+		return pkt, 0, nil, "unsupported route type", nil
+	}
+}
+
+func directTargetHash(pkt meshpkt.Packet) []byte {
+	if hops := pkt.Hops(); len(hops) > 0 {
+		return cloneBytes(hops[0])
+	}
+	if pkt.Type == meshpkt.PayloadTrace {
+		trace, err := meshpkt.DecodeTracePayload(pkt.Payload)
+		if err == nil {
+			if hashes := trace.RouteHashes(); len(hashes) > 0 {
+				return cloneBytes(hashes[0])
+			}
+		}
+	}
+	if payloadCarriesDestHash(pkt.Type) && len(pkt.Payload) > 0 {
+		return []byte{pkt.Payload[0]}
+	}
+	return nil
+}
+
+func payloadCarriesDestHash(t meshpkt.PayloadType) bool {
+	switch t {
+	case meshpkt.PayloadReq, meshpkt.PayloadResponse, meshpkt.PayloadTxtMsg, meshpkt.PayloadAnonReq, meshpkt.PayloadPath:
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneBytes(in []byte) []byte {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
+}
+
+func packetSummary(pkt meshpkt.Packet, raw []byte, mode ForwardMode, target []byte, rssi int, snr float64) string {
+	return Packet{Bytes: raw, Mesh: pkt, Mode: mode, TargetHash: target, RSSI: rssi, SNR: snr}.Summary()
+}
+
+// shouldForward returns true if this packet's content has not been forwarded
 // within DedupTTL. It also opportunistically prunes expired entries.
 func (b *Bridge) shouldForward(otaBytes []byte) bool {
 	h := sha256.Sum256(otaBytes)

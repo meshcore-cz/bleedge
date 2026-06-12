@@ -7,6 +7,7 @@
 package macos
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -696,13 +697,43 @@ func (n *Node) SendText(dst core.NodeID, text string, ttl uint8) error {
 	return n.transmit(dg)
 }
 
-// SendMeshCoreRaw floods an opaque MeshCore over-the-air packet into the
-// BLEEdge mesh as a PayloadTypeMeshCoreRaw DATA packet (broadcast, TTL 3).
-// The bytes are carried verbatim; no BLEEdge node decodes them. Used by the
-// meshcore bridge to repeat MeshCore adverts into BLEEdge.
+// SendMeshCoreRaw floods an opaque, complete MeshCore over-the-air packet into
+// the BLEEdge mesh as a v3 MESHCORE_PACKET datagram. The bytes are carried
+// verbatim; BLEEdge routing treats the payload as opaque.
 func (n *Node) SendMeshCoreRaw(payload []byte) error {
-	var broadcast core.NodeID
-	return n.sendData(broadcast, core.PayloadTypeMeshCoreRaw, payload, 3)
+	dg := n.router.NewBroadcast(core.ProtocolMeshCorePacket, payload, core.DefaultFloodTTL)
+	return n.transmit(dg)
+}
+
+// SendMeshCoreRawTo sends an opaque MeshCore packet to a specific reachable
+// BLEEdge neighbor as a v3 MESHCORE_PACKET datagram.
+func (n *Node) SendMeshCoreRawTo(dst core.NodeID, payload []byte) error {
+	dg, ok := n.router.NewUnicast(dst, core.ProtocolMeshCorePacket, payload, 0, core.DefaultFloodTTL, true)
+	if !ok {
+		return fmt.Errorf("no direct BLEEdge route to %s", dst)
+	}
+	return n.transmit(dg)
+}
+
+// MeshCoreNeighborForHash resolves a MeshCore node hash to a currently
+// reachable BLEEdge neighbor. MeshCore hashes are public-key prefixes.
+func (n *Node) MeshCoreNeighborForHash(hash []byte) (core.NodeID, bool) {
+	if len(hash) == 0 || len(hash) > core.PublicKeyBytes {
+		return core.NodeID{}, false
+	}
+	for _, nb := range n.router.Neighbors.All() {
+		if !n.isReachablePeer(nb.ID) {
+			continue
+		}
+		pub := nb.PublicKey
+		if len(pub) != core.PublicKeyBytes {
+			pub = n.router.PublicKeyFor(nb.ID)
+		}
+		if len(pub) >= len(hash) && bytes.Equal(pub[:len(hash)], hash) {
+			return nb.ID, true
+		}
+	}
+	return core.NodeID{}, false
 }
 
 // SendTyping sends an ephemeral "I'm typing" hint to dst (empty TYPING payload,

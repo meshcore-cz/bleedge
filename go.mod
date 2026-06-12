@@ -1,6 +1,6 @@
 module github.com/bleedge/bleedge
 
-go 1.24.2
+go 1.25.0
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
@@ -10,10 +10,12 @@ require (
 	github.com/go-ble/ble v0.0.0-20240122180141-8c5522f54333
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/mattn/go-runewidth v0.0.19
+	github.com/meshcore-cz/meshpkt v0.1.6
 	github.com/pkg/errors v0.8.1
 )
 
 require (
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/JuulLabs-OSS/cbgo v0.0.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

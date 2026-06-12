@@ -4,50 +4,109 @@ import (
 	"crypto/sha256"
 	"testing"
 	"time"
+
+	"github.com/meshcore-cz/meshpkt"
 )
 
-func TestIsAdvert(t *testing.T) {
-	cases := []struct {
-		name  string
-		first byte
-		want  bool
-	}{
-		// payload type is header bits 5-2; ADVERT = 0x04 -> 0x04<<2 = 0x10.
-		{"advert/flood", 0x10 | 0x01, true},
-		{"advert/direct", 0x10 | 0x02, true},
-		{"txtmsg", (0x02 << 2) | 0x01, false},
-		{"ack", (0x03 << 2) | 0x00, false},
-		{"grptxt", (0x05 << 2) | 0x01, false},
+func TestClassifyFloodPacket(t *testing.T) {
+	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
+		Route:        meshpkt.RouteFlood,
+		Type:         meshpkt.PayloadGrpTxt,
+		PathHashSize: 2,
+		Payload:      []byte{0xaa, 0xbb, 0xcc},
+	})
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
 	}
-	for _, c := range cases {
-		if got := IsAdvert([]byte{c.first, 0xAA, 0xBB}); got != c.want {
-			t.Errorf("%s: IsAdvert(%#02x)=%v, want %v", c.name, c.first, got, c.want)
-		}
+	pkt, mode, target, reason, err := classify(raw)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
 	}
-	if IsAdvert(nil) {
-		t.Error("IsAdvert(nil) should be false")
+	if mode != ForwardFlood || len(target) != 0 || reason != "" {
+		t.Fatalf("classify flood got mode=%v target=%x reason=%q", mode, target, reason)
+	}
+	if pkt.Type != meshpkt.PayloadGrpTxt {
+		t.Fatalf("type=%s", pkt.Type)
+	}
+}
+
+func TestClassifyDirectPacketWithRouteHash(t *testing.T) {
+	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
+		Route:        meshpkt.RouteDirect,
+		Type:         meshpkt.PayloadTxtMsg,
+		PathHashSize: 2,
+		Path:         []byte{0x12, 0x34, 0x56, 0x78},
+		Payload:      []byte{0xab, 0xcd, 0, 0},
+	})
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	_, mode, target, reason, err := classify(raw)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if mode != ForwardDirect || string(target) != string([]byte{0x12, 0x34}) || reason != "" {
+		t.Fatalf("classify direct got mode=%v target=%x reason=%q", mode, target, reason)
+	}
+}
+
+func TestClassifyDirectPacketWithPayloadDestHash(t *testing.T) {
+	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
+		Route:        meshpkt.RouteDirect,
+		Type:         meshpkt.PayloadTxtMsg,
+		PathHashSize: 2,
+		Payload:      []byte{0xab, 0xcd, 0, 0},
+	})
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	_, mode, target, reason, err := classify(raw)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if mode != ForwardDirect || string(target) != string([]byte{0xab}) || reason != "" {
+		t.Fatalf("classify direct got mode=%v target=%x reason=%q", mode, target, reason)
+	}
+}
+
+func TestClassifyDirectPacketWithoutTargetHash(t *testing.T) {
+	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
+		Route:        meshpkt.RouteDirect,
+		Type:         meshpkt.PayloadAck,
+		PathHashSize: 2,
+		Payload:      []byte{1, 2, 3, 4},
+	})
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	_, mode, target, reason, err := classify(raw)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if mode != 0 || len(target) != 0 || reason == "" {
+		t.Fatalf("classify direct got mode=%v target=%x reason=%q", mode, target, reason)
 	}
 }
 
 func TestShouldForwardDedup(t *testing.T) {
 	b := New(Config{DedupTTL: time.Hour})
-	adv := []byte{0x11, 1, 2, 3}
+	packet := []byte{0x11, 1, 2, 3}
 	other := []byte{0x11, 9, 9, 9}
 
-	if !b.shouldForward(adv) {
+	if !b.shouldForward(packet) {
 		t.Fatal("first sighting should forward")
 	}
-	if b.shouldForward(adv) {
-		t.Fatal("identical advert within TTL should be suppressed")
+	if b.shouldForward(packet) {
+		t.Fatal("identical packet within TTL should be suppressed")
 	}
 	if !b.shouldForward(other) {
-		t.Fatal("a different advert should forward")
+		t.Fatal("a different packet should forward")
 	}
 
 	// Expire the dedup entry and confirm it forwards again.
-	h := sha256.Sum256(adv)
+	h := sha256.Sum256(packet)
 	b.seen[h] = time.Now().Add(-2 * time.Hour)
-	if !b.shouldForward(adv) {
-		t.Fatal("advert past TTL should forward again")
+	if !b.shouldForward(packet) {
+		t.Fatal("packet past TTL should forward again")
 	}
 }

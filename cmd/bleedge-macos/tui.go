@@ -29,6 +29,7 @@ type uiEventKind int
 const (
 	uiEventNormal uiEventKind = iota
 	uiEventLog
+	uiEventBridge
 	uiEventError
 )
 
@@ -69,10 +70,11 @@ type tuiModel struct {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	logStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	logStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	bridgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 )
 
 func runTUI(ctx context.Context, cancel context.CancelFunc, errCh <-chan error, events <-chan uiEvent, node *blenode.Node, identity *core.Identity, current *blenode.Channel) error {
@@ -279,6 +281,8 @@ func styleLine(line string, kind uiEventKind) string {
 	switch kind {
 	case uiEventLog:
 		return logStyle.Render(line)
+	case uiEventBridge:
+		return bridgeStyle.Render(line)
 	case uiEventError:
 		return errStyle.Render(line)
 	default:
