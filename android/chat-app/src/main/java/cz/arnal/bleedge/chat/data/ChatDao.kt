@@ -24,6 +24,9 @@ interface ChatDao {
     @Query("UPDATE messages SET status = :status, routeHex = :route WHERE id = :id")
     suspend fun updateDelivery(id: String, status: Int, route: String)
 
+    @Query("UPDATE messages SET bridgedToMeshCore = 1, bridgedByHex = :bridgeHex WHERE id = :id")
+    suspend fun markBridgedToMeshCore(id: String, bridgeHex: String)
+
     @Query("UPDATE messages SET read = 1 WHERE peerHex = :peer AND incoming = 1 AND read = 0")
     suspend fun markRead(peer: String)
 

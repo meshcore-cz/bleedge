@@ -90,6 +90,9 @@ object ControlKind {
     const val ACK: Int = 2
     const val TRACE_REQUEST: Int = 3
     const val TRACE_RESPONSE: Int = 4
+
+    /** A gateway relayed a message onto an external network (e.g. MeshCore). Informational (§9.3). */
+    const val BRIDGED: Int = 5
 }
 
 /** Trace metric identifiers (§11.1). */

@@ -41,9 +41,17 @@ type rfPacket struct {
 }
 
 type request struct {
-	ID     uint64 `json:"id"`
-	Device string `json:"device,omitempty"`
-	Method string `json:"method"`
+	ID     uint64          `json:"id"`
+	Device string          `json:"device,omitempty"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+// sendMeshPacketParams mirrors meshcore-go's send_mesh_packet IPC params: an opaque, fully-formed
+// MeshCore OTA packet plus a priority hint (0 = default).
+type sendMeshPacketParams struct {
+	Priority byte   `json:"priority"`
+	Packet   []byte `json:"packet"`
 }
 
 type response struct {
@@ -121,8 +129,9 @@ type Config struct {
 type Bridge struct {
 	cfg Config
 
-	mu   sync.Mutex
-	seen map[[32]byte]time.Time // content hash -> last-forwarded time
+	mu      sync.Mutex
+	seen    map[[32]byte]time.Time // content hash -> last-forwarded time (MeshCore -> BLEEdge)
+	seenOut map[string]time.Time   // BLEEdge datagram id hex -> last-bridged time (BLEEdge -> MeshCore)
 }
 
 // New creates a Bridge from cfg, applying defaults.
@@ -136,7 +145,7 @@ func New(cfg Config) *Bridge {
 	if cfg.ReconnectDelay <= 0 {
 		cfg.ReconnectDelay = 2 * time.Second
 	}
-	return &Bridge{cfg: cfg, seen: make(map[[32]byte]time.Time)}
+	return &Bridge{cfg: cfg, seen: make(map[[32]byte]time.Time), seenOut: make(map[string]time.Time)}
 }
 
 func (b *Bridge) logf(format string, args ...any) {
@@ -383,6 +392,87 @@ func (b *Bridge) shouldForwardPacket(pkt meshpkt.Packet, otaBytes []byte) bool {
 		return true
 	}
 	return b.shouldForward(otaBytes)
+}
+
+// shouldBridgeOut returns true the first time a given BLEEdge channel datagram (keyed by its id
+// hex) is offered for outbound bridging within DedupTTL. This guarantees each BLEEdge channel
+// message is emitted onto MeshCore at most once, even if it reaches us over multiple BLEEdge paths.
+func (b *Bridge) shouldBridgeOut(datagramIDHex string) bool {
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, t := range b.seenOut {
+		if now.Sub(t) > b.cfg.DedupTTL {
+			delete(b.seenOut, k)
+		}
+	}
+	if t, ok := b.seenOut[datagramIDHex]; ok && now.Sub(t) <= b.cfg.DedupTTL {
+		return false
+	}
+	b.seenOut[datagramIDHex] = now
+	return true
+}
+
+// BridgeChannelOut emits a BLEEdge channel message onto the real MeshCore network as a GRP_TXT,
+// exactly once per BLEEdge datagram. channelPayload is the bare MeshCore GRP_TXT channel_payload
+// (hash|mac|ciphertext) carried inside the BLEEdge channel datagram — already MeshCore-compatible,
+// so it is wrapped verbatim in a flood OTA packet and injected via send_mesh_packet.
+//
+// Returns bridged=false (with nil error) when this datagram id was already bridged. On success it
+// returns a short hash of the emitted OTA packet for the ACK_BRIDGED correlation id.
+func (b *Bridge) BridgeChannelOut(ctx context.Context, datagramIDHex string, channelPayload []byte) (meshHash []byte, bridged bool, err error) {
+	if len(channelPayload) == 0 {
+		return nil, false, fmt.Errorf("empty channel payload")
+	}
+	if !b.shouldBridgeOut(datagramIDHex) {
+		return nil, false, nil
+	}
+	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
+		Type:    meshpkt.PayloadGrpTxt,
+		Route:   meshpkt.RouteFlood,
+		Payload: channelPayload,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("encode GRP_TXT: %w", err)
+	}
+	if err := b.SendMeshPacket(ctx, 0, raw); err != nil {
+		return nil, false, fmt.Errorf("send_mesh_packet: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return sum[:8], true, nil
+}
+
+// SendMeshPacket injects an opaque, fully-formed MeshCore OTA packet onto the radio via the
+// meshcore-go backend's send_mesh_packet IPC. It dials a short-lived request/response connection
+// (separate from the long-lived watch_rf stream).
+func (b *Bridge) SendMeshPacket(ctx context.Context, priority byte, pkt []byte) error {
+	d := net.Dialer{Timeout: 250 * time.Millisecond}
+	conn, err := d.DialContext(ctx, "unix", b.cfg.Socket)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", b.cfg.Socket, err)
+	}
+	defer conn.Close()
+
+	params, err := json.Marshal(sendMeshPacketParams{Priority: priority, Packet: pkt})
+	if err != nil {
+		return err
+	}
+	req := request{ID: 1, Device: b.cfg.Device, Method: "send_mesh_packet", Params: params}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+
+	var resp response
+	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "unknown backend error"
+		}
+		return fmt.Errorf("send_mesh_packet rejected: %s", resp.Error)
+	}
+	return nil
 }
 
 // DefaultSocketPath mirrors meshcore-go backend.SocketPath(): MC_BACKEND_SOCKET

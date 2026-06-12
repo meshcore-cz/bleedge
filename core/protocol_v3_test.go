@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"testing"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 func testNodeID(b byte) NodeID {
@@ -128,5 +130,36 @@ func TestRouterBuildsAckOnlyWhenRequested(t *testing.T) {
 	ack := acts[1].Datagram
 	if ack.Protocol != ProtocolBLEEdgeControl || ack.Destination != alice.NodeID() || len(ack.Route) != 1 || ack.Route[0] != alice.NodeID() {
 		t.Fatalf("bad ack: %+v", ack)
+	}
+}
+
+func TestBridgedBodyRoundTrip(t *testing.T) {
+	id := NewDatagramID()
+	bridge := NodeID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	hash := []byte{0xde, 0xad, 0xbe, 0xef}
+
+	payload, err := BridgedBody{BridgedID: id, BridgeID: bridge, MeshHash: hash}.ToControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl, err := DecodeControl(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctrl.Kind != ControlBridged {
+		t.Fatalf("kind = %d, want ControlBridged(%d)", ctrl.Kind, ControlBridged)
+	}
+	var got BridgedBody
+	if err := cbor.Unmarshal(ctrl.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.BridgedID != id {
+		t.Errorf("BridgedID = %x, want %x", got.BridgedID, id)
+	}
+	if got.BridgeID != bridge {
+		t.Errorf("BridgeID = %x, want %x", got.BridgeID, bridge)
+	}
+	if string(got.MeshHash) != string(hash) {
+		t.Errorf("MeshHash = %x, want %x", got.MeshHash, hash)
 	}
 }

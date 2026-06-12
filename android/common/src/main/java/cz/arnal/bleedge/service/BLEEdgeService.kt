@@ -32,6 +32,7 @@ import cz.arnal.bleedge.meshcore.MeshCoreCodec
 import cz.arnal.bleedge.meshcore.MeshCorePacket
 import cz.arnal.bleedge.meshcore.MeshCoreType
 import cz.arnal.bleedge.protocol.AckBody
+import cz.arnal.bleedge.protocol.BridgedBody
 import cz.arnal.bleedge.protocol.Action
 import cz.arnal.bleedge.protocol.ActionType
 import cz.arnal.bleedge.protocol.AnnounceBody
@@ -126,6 +127,10 @@ data class ReceivedMessage(
     val reactionRemove: Boolean = false,
     val channelReactionPayload: ByteArray? = null,
     val traceResponse: TraceResponseBody? = null,
+    // Set on an inbound ACK_BRIDGED (ControlKind.BRIDGED): a gateway relayed the channel datagram
+    // [bridgedDatagramId] onto an external network (MeshCore). [bridgedByNodeId] is the gateway.
+    val bridgedDatagramId: ByteArray? = null,
+    val bridgedByNodeId: NodeId? = null,
     val path: List<NodeId> = emptyList(),
     val fromMeshCore: Boolean = false,
     // MeshCore carrier metadata (set when fromMeshCore), surfaced in message details.
@@ -882,6 +887,20 @@ class BLEEdgeService : Service() {
             ControlKind.TRACE_RESPONSE -> {
                 val body = runCatching { TraceResponseBody.decode(ctrl.body) }.getOrNull()
                 appendMessage(ReceivedMessage(dg.source, dg.id, dg.protocol, traceResponse = body, path = dg.path))
+            }
+            ControlKind.BRIDGED -> {
+                val body = runCatching { BridgedBody.decode(ctrl.body) }.getOrNull()
+                if (body != null) {
+                    log("BRIDGED from=${dg.source.toHex()} dg=${body.bridgedId.take(4).toHex()} -> MeshCore", LogTag.MSG)
+                    appendMessage(
+                        ReceivedMessage(
+                            dg.source, dg.id, dg.protocol,
+                            bridgedDatagramId = body.bridgedId,
+                            bridgedByNodeId = body.bridgeId,
+                            path = dg.path,
+                        ),
+                    )
+                }
             }
             else -> Unit
         }

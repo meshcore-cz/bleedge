@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -752,6 +753,33 @@ private fun MeshCoreBadge() {
     }
 }
 
+/** Small pill on our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). */
+@Composable
+private fun BridgedBadge() {
+    Surface(
+        color = Color(0xFF00838F).copy(alpha = 0.16f),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.CallMade,
+                contentDescription = null,
+                modifier = Modifier.size(11.dp),
+                tint = Color(0xFF00838F),
+            )
+            Text(
+                "MeshCore",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF00838F),
+            )
+        }
+    }
+}
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
@@ -827,6 +855,8 @@ private fun MessageBubble(
                             }
                         }
                     } else RouteIndicator(msg.routeHex)
+                    // A gateway relayed this channel message onto MeshCore (ACK_BRIDGED).
+                    if (mine && msg.bridgedToMeshCore) BridgedBadge()
                     // Repeats of this (flooded) message we heard echoed back across the mesh.
                     if (mine && repeatCount > 0) {
                         Icon(

@@ -91,6 +91,10 @@ const (
 	ControlAck           ControlKind = 2
 	ControlTraceRequest  ControlKind = 3
 	ControlTraceResponse ControlKind = 4
+	// ControlBridged (ACK_BRIDGED) tells the original sender of a BLEEdge channel message that a
+	// gateway relayed it onto an external network (e.g. MeshCore as a GRP_TXT). Informational only;
+	// never relied on for routing. §9.2.
+	ControlBridged ControlKind = 5
 )
 
 type TraceMetric uint8

@@ -768,6 +768,17 @@ func (n *Node) SendMeshCoreRawToWithInfo(dst core.NodeID, payload []byte) (Trans
 	return n.transmitWithInfo(dg)
 }
 
+// SendBridgedAck returns an ACK_BRIDGED control datagram to dst — the original sender of a channel
+// message this node just relayed onto an external network (e.g. MeshCore). meshHash is a short
+// correlation hash of the emitted external packet. Informational only.
+func (n *Node) SendBridgedAck(dst core.NodeID, bridgedID core.DatagramID, meshHash []byte) error {
+	dg, ok := n.router.BuildBridged(dst, bridgedID, meshHash)
+	if !ok {
+		return fmt.Errorf("no route to bridged sender %s", dst)
+	}
+	return n.transmit(dg)
+}
+
 // MeshCoreNeighborForHash resolves a MeshCore node hash to a currently
 // reachable BLEEdge neighbor. MeshCore hashes are public-key prefixes.
 func (n *Node) MeshCoreNeighborForHash(hash []byte) (core.NodeID, bool) {

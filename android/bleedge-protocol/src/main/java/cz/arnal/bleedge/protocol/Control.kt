@@ -153,6 +153,33 @@ data class AckBody(val ackedId: ByteArray) {
     }
 }
 
+/**
+ * BRIDGED body (§9.3): sent to a channel message's sender after a gateway relayed it onto an
+ * external network (e.g. MeshCore as a GRP_TXT). [bridgedId] is the bridged datagram id,
+ * [bridgeId] the gateway NodeID, [meshHash] an optional short correlation hash. Informational only.
+ */
+data class BridgedBody(
+    val bridgedId: ByteArray,
+    val bridgeId: NodeId,
+    val meshHash: ByteArray?,
+) {
+    fun toControl(): ControlMessage {
+        val map = CBORObject.NewOrderedMap()
+        map[k(1)] = CBORObject.FromObject(bridgedId)
+        map[k(2)] = CBORObject.FromObject(bridgeId.bytes)
+        meshHash?.let { map[k(3)] = CBORObject.FromObject(it) }
+        return ControlMessage(ControlKind.BRIDGED, map)
+    }
+
+    companion object {
+        fun decode(body: CBORObject): BridgedBody = BridgedBody(
+            bridgedId = body[k(1)].GetByteString(),
+            bridgeId = NodeId(body[k(2)].GetByteString()),
+            meshHash = body[k(3)]?.GetByteString(),
+        )
+    }
+}
+
 /** TRACE_REQUEST body (§11.2). */
 data class TraceRequestBody(
     val tag: Long,

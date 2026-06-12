@@ -157,6 +157,24 @@ func (a AckBody) ToControl() ([]byte, error) {
 	return ControlMessage{Kind: ControlAck, Body: body}.Encode()
 }
 
+// BridgedBody (ACK_BRIDGED, §9.2) is returned to the sender of a channel message after a gateway
+// relayed it onto an external network. BridgedID is the bridged BLEEdge datagram id, BridgeID the
+// gateway's NodeID, and MeshHash an optional short hash of the emitted external packet (for dedup
+// / correlation). Purely informational; never used for routing.
+type BridgedBody struct {
+	BridgedID DatagramID `cbor:"1,keyasint"`
+	BridgeID  NodeID     `cbor:"2,keyasint"`
+	MeshHash  []byte     `cbor:"3,keyasint,omitempty"`
+}
+
+func (b BridgedBody) ToControl() ([]byte, error) {
+	body, err := cbor.Marshal(b)
+	if err != nil {
+		return nil, err
+	}
+	return ControlMessage{Kind: ControlBridged, Body: body}.Encode()
+}
+
 type TraceRequestBody struct {
 	Tag            uint32      `cbor:"1,keyasint"`
 	Metric         TraceMetric `cbor:"2,keyasint"`

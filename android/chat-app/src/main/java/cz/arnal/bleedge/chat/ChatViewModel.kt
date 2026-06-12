@@ -728,6 +728,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             dao.updateDelivery(acked.toHex(), MsgStatus.DELIVERED, msg.path.toRouteHex())
             return
         }
+        // ACK_BRIDGED: a gateway relayed one of our channel messages onto MeshCore. The bridged
+        // datagram id is the channel Message's primary key, so mark it directly.
+        msg.bridgedDatagramId?.let { bridgedId ->
+            val idHex = bridgedId.toHex()
+            if (!processed.add("bridged:$idHex")) return
+            dao.markBridgedToMeshCore(idHex, msg.bridgedByNodeId?.toHex() ?: "")
+            return
+        }
         if (msg.protocol == PayloadProtocol.BLEEDGE_CONTROL && msg.traceResponse != null) {
             handleTraceResponse(msg); return
         }

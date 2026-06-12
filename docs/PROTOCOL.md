@@ -373,6 +373,7 @@ Control kinds:
 |     2 | `ACK`            | Confirm local delivery of one datagram            |
 |     3 | `TRACE_REQUEST`  | Request BLEEdge-native route diagnostics          |
 |     4 | `TRACE_RESPONSE` | Return BLEEdge-native route diagnostics           |
+|     5 | `BRIDGED`        | Notify a sender their message reached an external network (e.g. MeshCore) |
 
 Unknown control kinds MUST be ignored after local delivery. Relays MAY forward
 unknown control kinds according to the outer BLEEdge routing rules.
@@ -560,6 +561,39 @@ An ACK MUST NOT itself request an ACK.
 
 Applications that already provide their own acknowledgement semantics SHOULD
 omit `ACK_REQUESTED`.
+
+### 9.3 BRIDGED control message (ACK_BRIDGED)
+
+A gateway that relays a BLEEdge message onto an external network (e.g. a MeshCore
+LoRa mesh) MAY notify the original sender with a `BRIDGED` control message. It is
+purely informational — a hint that the message left the BLEEdge mesh — and MUST
+NOT be relied on for routing or treated as end-to-end delivery confirmation.
+
+Currently emitted for **channel messages** (`BLEEDGE_CHAT` GRP_TXT): when a
+gateway re-emits a channel datagram as a MeshCore GRP_TXT, it sends one `BRIDGED`
+back to `datagram.source`.
+
+`BRIDGED` body:
+
+| Key | Field        | Type      | Required | Notes                                              |
+| --: | ------------ | --------- | -------- | -------------------------------------------------- |
+|   1 | `bridged_id` | bytes(16) | yes      | id of the bridged BLEEdge datagram                 |
+|   2 | `bridge_id`  | bytes(10) | yes      | NodeID of the gateway that performed the bridge    |
+|   3 | `mesh_hash`  | bytes     | no       | short hash of the emitted external packet (correlation) |
+
+Generation:
+
+```text
+source      = gateway NodeID
+destination = bridged.source
+protocol    = BLEEDGE_CONTROL
+kind        = BRIDGED
+```
+
+It is delivered by source route when one is known, else flooded. A gateway MUST
+emit at most **one** `BRIDGED` per bridged datagram, mirroring its
+"emit onto the external network exactly once" dedup (keyed on the BLEEdge
+datagram id). `BRIDGED` MUST NOT request an ACK and MUST NOT itself be bridged.
 
 ---
 

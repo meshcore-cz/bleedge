@@ -423,6 +423,13 @@ fun MessageDetailsSheet(
                 }
                 if (msg.meshCorePacketId.isNotBlank()) DetailRow("MeshCore packet", msg.meshCorePacketId)
             }
+            // Outbound bridging: a gateway relayed this channel message onto MeshCore (ACK_BRIDGED).
+            if (msg.bridgedToMeshCore) {
+                DetailRow(
+                    "Bridged to MeshCore",
+                    if (msg.bridgedByHex.isNotBlank()) "via ${vm.nameForHex(msg.bridgedByHex).ifBlank { msg.bridgedByHex.take(12) }}" else "yes",
+                )
+            }
             DetailRow("Time", "${dayFmt.format(Date(msg.timestampMs))} ${formatClock(msg.timestampMs)}")
             if (!msg.incoming) {
                 DetailRow("Status", when {

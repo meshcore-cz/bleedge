@@ -233,3 +233,16 @@ func bytesOf(v byte, n int) []byte {
 	}
 	return b
 }
+
+func TestShouldBridgeOutDedup(t *testing.T) {
+	b := New(Config{DedupTTL: time.Minute})
+	if !b.shouldBridgeOut("aabbcc") {
+		t.Fatal("first sight should bridge")
+	}
+	if b.shouldBridgeOut("aabbcc") {
+		t.Fatal("same datagram id must not bridge twice")
+	}
+	if !b.shouldBridgeOut("ddeeff") {
+		t.Fatal("a different datagram id should bridge")
+	}
+}

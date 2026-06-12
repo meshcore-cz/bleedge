@@ -207,6 +207,16 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 		}
 		emitLog(line)
 	}
+	// Hoisted so OnMessage (defined below) can bridge outbound channel messages once the bridge is
+	// started further down; bridgeLog is the shared status sink for both directions.
+	bridgeLog := func(s string) {
+		if headless {
+			fmt.Fprintln(os.Stderr, s)
+			return
+		}
+		emitBridge(fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), s))
+	}
+	var br *mcbridge.Bridge
 	node = blenode.New(blenode.Config{
 		Identity:      identity,
 		Name:          nodeName,
@@ -217,6 +227,40 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 		AnnounceEpoch: announceEpoch,
 		LogFn:         logFn,
 		OnMessage: func(dg core.Datagram) {
+			// Bridge native BLEEdge channel messages outward onto the real MeshCore network as a
+			// GRP_TXT — exactly once per BLEEdge datagram — then ACK_BRIDGED the original sender.
+			// Diagnostics go to BOTH the bridge pane and the main log so they're easy to see.
+			outLog := func(s string) {
+				bridgeLog(s)
+				emitLog(fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), s))
+			}
+			if meshcoreBridge && dg.Protocol == core.ProtocolBLEEdgeChat {
+				idHex := hex.EncodeToString(dg.ID[:])
+				cp := core.ChannelPayloadFromChat(dg.Payload)
+				switch {
+				case br == nil:
+					outLog(fmt.Sprintf("meshcore bridge: out skip dg=%s reason=bridge-disabled", idHex))
+				case len(cp) == 0:
+					outLog(fmt.Sprintf("meshcore bridge: out skip dg=%s reason=not-a-channel-message", idHex))
+				default:
+					go func(src core.NodeID, id core.DatagramID, cp []byte, idHex string) {
+						meshHash, bridged, err := br.BridgeChannelOut(ctx, idHex, cp)
+						if err != nil {
+							outLog(fmt.Sprintf("meshcore bridge: out FAILED dg=%s: %v", idHex, err))
+							return
+						}
+						if !bridged {
+							return // already emitted onto MeshCore
+						}
+						outLog(fmt.Sprintf("meshcore bridge: out dg=%s -> MeshCore GRP_TXT hash=%s", idHex, hex.EncodeToString(meshHash)))
+						if err := node.SendBridgedAck(src, id, meshHash); err != nil {
+							outLog(fmt.Sprintf("meshcore bridge: ack_bridged FAILED dg=%s: %v", idHex, err))
+						} else {
+							outLog(fmt.Sprintf("meshcore bridge: ack_bridged -> %s dg=%s", src, idHex))
+						}
+					}(dg.Source, dg.ID, cp, idHex)
+				}
+			}
 			// The bot consumes every message; the TUI (when present) also shows it.
 			if theBot != nil {
 				theBot.onIncoming(dg)
@@ -247,16 +291,10 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 	errCh := make(chan error, 1)
 	go func() { errCh <- node.Run(ctx) }()
 
-	// MeshCore bridge: tap the meshcore-go backend and re-flood packets.
+	// MeshCore bridge: tap the meshcore-go backend and re-flood packets. The outbound direction
+	// (BLEEdge channel -> MeshCore GRP_TXT) is driven from OnMessage above via this same bridge.
 	if meshcoreBridge {
-		bridgeLog := func(s string) {
-			if headless {
-				fmt.Fprintln(os.Stderr, s)
-				return
-			}
-			emitBridge(fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), s))
-		}
-		br := mcbridge.New(mcbridge.Config{Socket: meshcoreSocket, Log: bridgeLog})
+		br = mcbridge.New(mcbridge.Config{Socket: meshcoreSocket, Log: bridgeLog})
 		go br.Run(ctx, func(pkt mcbridge.Packet) {
 			switch pkt.Mode {
 			case mcbridge.ForwardFlood:

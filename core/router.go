@@ -192,6 +192,16 @@ func (r *Router) buildAck(delivered Datagram) Action {
 	return Action{Type: ActionSendAck, Datagram: ack, NextHop: &next}
 }
 
+// BuildBridged constructs an ACK_BRIDGED control datagram addressed to dst (the original sender of
+// a bridged channel message). Delivered by source route when one is known, else flooded.
+func (r *Router) BuildBridged(dst NodeID, bridgedID DatagramID, meshHash []byte) (Datagram, bool) {
+	payload, err := BridgedBody{BridgedID: bridgedID, BridgeID: r.LocalID, MeshHash: meshHash}.ToControl()
+	if err != nil {
+		return Datagram{}, false
+	}
+	return r.NewUnicast(dst, ProtocolBLEEdgeControl, payload, 0, DefaultFloodTTL, false)
+}
+
 func (r *Router) BuildAnnounce(caps Capabilities, epoch uint64, seq uint32) (Datagram, error) {
 	if r.Identity == nil {
 		return Datagram{}, fmt.Errorf("router has no signing identity")

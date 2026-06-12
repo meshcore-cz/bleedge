@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
     entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -60,12 +60,21 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v10→v11: record that a channel message was relayed onto MeshCore by a gateway
+        // (ACK_BRIDGED). Additive — migrate in place.
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN bridgedToMeshCore INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE messages ADD COLUMN bridgedByHex TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun get(context: Context): ChatDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 "bleedge_chat.db",
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .fallbackToDestructiveMigration()
                 .build().also { instance = it }
         }
