@@ -30,7 +30,14 @@ var (
 	packetOutUUID = ble.MustParse("9B7E6A10-7D91-4C19-A3B8-6E2A11F3A004")
 )
 
-const interFrameDelay = 20 * time.Millisecond
+const (
+	interFrameDelay       = 20 * time.Millisecond
+	notifyRetryMinDelay   = 40 * time.Millisecond
+	notifyRetryMaxDelay   = 500 * time.Millisecond
+	notifyGlobalPace      = 8 * time.Millisecond
+	notifyBackpressureLog = 2 * time.Second
+	notifyLogAfterRetries = 3
+)
 
 // Node is a macOS BLEEdge node.
 type Node struct {
@@ -47,6 +54,9 @@ type Node struct {
 	announceEpoch uint64
 
 	mu sync.Mutex
+	// CoreBluetooth's notification transmit queue is global-ish, not per subscriber.
+	notifyMu     sync.Mutex
+	notifyNextAt time.Time
 	// peer addr string → link
 	peers map[string]*MacPeerLink
 	// notifiers for PACKET_OUT (server-side subscribers)
@@ -70,10 +80,11 @@ type TransmitInfo struct {
 }
 
 type serverNotifier struct {
-	addr     string
-	notifier ble.Notifier
-	queue    chan []byte
-	done     chan struct{}
+	addr      string
+	notifier  ble.Notifier
+	queue     chan []byte
+	priorityQ chan []byte
+	done      chan struct{}
 }
 
 // Config holds startup parameters.
@@ -625,17 +636,27 @@ func (n *Node) relayFlood(a core.Action) {
 	}
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	links := make([]*MacPeerLink, 0, len(n.peers))
 	for addr, link := range n.peers {
 		if a.ExcludePeer != nil && link.peerID == *a.ExcludePeer {
 			continue // don't relay back to incoming peer
 		}
-		n.sendFramesToLink(link, frames)
+		links = append(links, link)
 		_ = addr
 	}
-	// Also notify server-side subscribers
+	notifiers := make([]*serverNotifier, 0, len(n.notifiers))
 	for _, notifier := range n.notifiers {
-		n.notifyFrames(notifier, frames)
+		notifiers = append(notifiers, notifier)
+	}
+	n.mu.Unlock()
+
+	for _, link := range links {
+		n.sendFramesToLink(link, frames)
+	}
+	// Also notify server-side subscribers
+	priority := a.Datagram.Protocol == core.ProtocolBLEEdgeChat || a.Datagram.Protocol == core.ProtocolBLEEdgeControl
+	for _, notifier := range notifiers {
+		n.notifyFrames(notifier, frames, priority)
 	}
 }
 
@@ -684,13 +705,21 @@ func (n *Node) announceLoop(ctx context.Context) {
 			}
 			frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
 			n.mu.Lock()
+			links := make([]*MacPeerLink, 0, len(n.peers))
 			for _, link := range n.peers {
-				n.sendFramesToLink(link, frames)
+				links = append(links, link)
 			}
+			notifiers := make([]*serverNotifier, 0, len(n.notifiers))
 			for _, notifier := range n.notifiers {
-				n.notifyFrames(notifier, frames)
+				notifiers = append(notifiers, notifier)
 			}
 			n.mu.Unlock()
+			for _, link := range links {
+				n.sendFramesToLink(link, frames)
+			}
+			for _, notifier := range notifiers {
+				n.notifyFrames(notifier, frames, true)
+			}
 		}
 	}
 }
@@ -852,13 +881,23 @@ func (n *Node) transmitWithInfo(dg core.Datagram) (TransmitInfo, error) {
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
 	info := TransmitInfo{DatagramID: dg.ID, DatagramBytes: len(data), FragmentCount: len(frames)}
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	links := make([]*MacPeerLink, 0, len(n.peers))
 	for _, link := range n.peers {
+		links = append(links, link)
+	}
+	notifiers := make([]*serverNotifier, 0, len(n.notifiers))
+	for _, notifier := range n.notifiers {
+		notifiers = append(notifiers, notifier)
+	}
+	n.mu.Unlock()
+
+	for _, link := range links {
 		n.sendFramesToLink(link, frames)
 	}
 	// Also send to server-side subscribers (peers that connected TO us)
-	for _, notifier := range n.notifiers {
-		n.notifyFrames(notifier, frames)
+	priority := dg.Protocol == core.ProtocolBLEEdgeChat || dg.Protocol == core.ProtocolBLEEdgeControl
+	for _, notifier := range notifiers {
+		n.notifyFrames(notifier, frames, priority)
 	}
 	return info, nil
 }
@@ -882,9 +921,9 @@ func (n *Node) transmitToRoute(dg core.Datagram) error {
 
 func (n *Node) sendFramesToPeer(frames []core.Frame, peer core.NodeID) bool {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	for _, link := range n.peers {
 		if link.peerID == peer {
+			n.mu.Unlock()
 			n.sendFramesToLink(link, frames)
 			return true
 		}
@@ -897,9 +936,11 @@ func (n *Node) sendFramesToPeer(frames []core.Frame, peer core.NodeID) bool {
 		if !ok {
 			continue
 		}
-		n.notifyFrames(notifier, frames)
+		n.mu.Unlock()
+		n.notifyFrames(notifier, frames, true)
 		return true
 	}
+	n.mu.Unlock()
 	return false
 }
 
@@ -921,9 +962,9 @@ func (n *Node) sendFramesToLink(link *MacPeerLink, frames []core.Frame) {
 	}
 }
 
-func (n *Node) notifyFrames(notifier *serverNotifier, frames []core.Frame) {
+func (n *Node) notifyFrames(notifier *serverNotifier, frames []core.Frame, priority bool) {
 	for i, f := range frames {
-		if !notifier.enqueue(f.Encode()) {
+		if !notifier.enqueue(f.Encode(), priority) {
 			n.logf("notify queue full addr=%s fragment=%d/%d", notifier.addr, i+1, len(frames))
 		}
 		if len(frames) > 1 && i+1 < len(frames) {
@@ -934,10 +975,11 @@ func (n *Node) notifyFrames(notifier *serverNotifier, frames []core.Frame) {
 
 func (n *Node) newServerNotifier(addr string, notifier ble.Notifier) *serverNotifier {
 	sn := &serverNotifier{
-		addr:     addr,
-		notifier: notifier,
-		queue:    make(chan []byte, 256),
-		done:     make(chan struct{}),
+		addr:      addr,
+		notifier:  notifier,
+		queue:     make(chan []byte, 256),
+		priorityQ: make(chan []byte, 64),
+		done:      make(chan struct{}),
 	}
 	go n.runServerNotifier(sn)
 	return sn
@@ -945,32 +987,88 @@ func (n *Node) newServerNotifier(addr string, notifier ble.Notifier) *serverNoti
 
 func (n *Node) runServerNotifier(sn *serverNotifier) {
 	for {
-		select {
-		case <-sn.done:
+		frame, ok := sn.nextFrame()
+		if !ok {
 			return
-		case frame := <-sn.queue:
-			for {
-				_, err := sn.notifier.Write(frame)
-				if err == nil {
-					break
+		}
+		retries := 0
+		delay := notifyRetryMinDelay
+		lastLog := time.Time{}
+		var lastErr error
+		for {
+			_, err := n.writeNotification(sn, frame)
+			if err == nil {
+				if retries >= notifyLogAfterRetries {
+					n.logf("notify recovered addr=%s after %d retries (last error: %v)", sn.addr, retries, lastErr)
 				}
-				n.logf("notify backpressure addr=%s: %v; retrying", sn.addr, err)
-				select {
-				case <-sn.done:
-					return
-				case <-time.After(50 * time.Millisecond):
+				break
+			}
+			retries++
+			lastErr = err
+			if retries >= notifyLogAfterRetries && (lastLog.IsZero() || time.Since(lastLog) >= notifyBackpressureLog) {
+				n.logf("notify backpressure addr=%s: %v; queued=%d priority=%d retry=%d next=%s", sn.addr, err, len(sn.queue), len(sn.priorityQ), retries, delay)
+				lastLog = time.Now()
+			}
+			select {
+			case <-sn.done:
+				return
+			case <-time.After(delay):
+				if delay < notifyRetryMaxDelay {
+					delay *= 2
+					if delay > notifyRetryMaxDelay {
+						delay = notifyRetryMaxDelay
+					}
 				}
 			}
 		}
 	}
 }
 
-func (s *serverNotifier) enqueue(frame []byte) bool {
+func (s *serverNotifier) nextFrame() ([]byte, bool) {
+	select {
+	case frame := <-s.priorityQ:
+		return frame, true
+	default:
+	}
+	select {
+	case frame := <-s.priorityQ:
+		return frame, true
+	case frame := <-s.queue:
+		return frame, true
+	case <-s.done:
+		return nil, false
+	}
+}
+
+func (n *Node) writeNotification(sn *serverNotifier, frame []byte) (int, error) {
+	n.notifyMu.Lock()
+	defer n.notifyMu.Unlock()
+
+	if wait := time.Until(n.notifyNextAt); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-sn.done:
+			timer.Stop()
+			return 0, context.Canceled
+		case <-timer.C:
+		}
+	}
+
+	written, err := sn.notifier.Write(frame)
+	n.notifyNextAt = time.Now().Add(notifyGlobalPace)
+	return written, err
+}
+
+func (s *serverNotifier) enqueue(frame []byte, priority bool) bool {
 	frame = append([]byte(nil), frame...)
+	queue := s.queue
+	if priority {
+		queue = s.priorityQ
+	}
 	select {
 	case <-s.done:
 		return false
-	case s.queue <- frame:
+	case queue <- frame:
 		return true
 	default:
 		return false

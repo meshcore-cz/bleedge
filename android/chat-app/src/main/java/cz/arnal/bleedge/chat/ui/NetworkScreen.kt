@@ -72,7 +72,7 @@ fun NetworkScreen(
             .associate { it.nodeId.toHex() to it.publicKey.toHex() }
     }
     // A direct peer is always reachable, so the Trace button targets the first one.
-    val traceTarget = peers.firstOrNull()?.nodeId?.toHex()
+    val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex()
 
     Scaffold(
         topBar = {
@@ -283,7 +283,11 @@ private fun PeerRow(peer: PeerInfo, pubKeyHex: String?, onClick: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 SignalDot(peer.rssi, "rssi")
                 Text(
-                    "${if (peer.incoming) "inbound" else "outbound"} · ${peer.txPhy} · ${peer.caps}",
+                    listOf(
+                        if (peer.degraded) "degraded" else if (peer.incoming) "inbound" else "outbound",
+                        peer.txPhy.toString(),
+                        peer.caps.toString(),
+                    ).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

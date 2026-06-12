@@ -9,16 +9,22 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import cz.arnal.bleedge.protocol.Capabilities
 import cz.arnal.bleedge.protocol.NodeId
 import cz.arnal.bleedge.transport.BLEEdgeUUIDs
 import cz.arnal.bleedge.transport.NodeInfo
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 private const val TAG = "BLEEdgeGattServer"
+private const val MAX_NOTIFY_QUEUE = 128
+private const val MAX_NOTIFY_FAILURES = 3
 
 /**
  * GATT server exposing BLEEdge service with three characteristics:
@@ -33,10 +39,16 @@ class BLEEdgeGattServer(
     private val onFrameReceived: (ByteArray, BluetoothDevice) -> Unit,
     private val onDeviceConnected: ((BluetoothDevice) -> Unit)? = null,
     private val onDeviceDisconnected: ((BluetoothDevice) -> Unit)? = null,
+    private val onDeviceUnreachable: ((BluetoothDevice, String) -> Unit)? = null,
     private val onLog: ((String) -> Unit)? = null,
 ) {
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var gattServer: BluetoothGattServer? = null
     private val notifyDevices = CopyOnWriteArrayList<BluetoothDevice>()
+    private val notifyLock = Any()
+    private val notifyQueues = ConcurrentHashMap<String, ArrayDeque<ByteArray>>()
+    private val notifyInFlight = ConcurrentHashMap<String, Boolean>()
+    private val notifyFailures = ConcurrentHashMap<String, Int>()
     private lateinit var packetOutChar: BluetoothGattCharacteristic
 
     fun start() {
@@ -86,32 +98,101 @@ class BLEEdgeGattServer(
 
     /** Send a frame to all subscribed PACKET_OUT clients. */
     fun notifyFrame(frame: ByteArray) {
-        val server = gattServer ?: return
         for (device in notifyDevices) {
-            sendNotify(server, device, frame)
+            enqueueNotify(device, frame)
         }
     }
 
-    fun notifyFrameTo(frame: ByteArray, device: BluetoothDevice) {
+    fun notifyFrameTo(frame: ByteArray, device: BluetoothDevice): Boolean {
+        if (!notifyDevices.contains(device)) return false
+        return enqueueNotify(device, frame)
+    }
+
+    private fun enqueueNotify(device: BluetoothDevice, frame: ByteArray): Boolean {
+        if (gattServer == null || !notifyDevices.contains(device)) return false
+        synchronized(notifyLock) {
+            val q = notifyQueues.getOrPut(deviceKey(device)) { ArrayDeque() }
+            if (q.size >= MAX_NOTIFY_QUEUE) q.removeFirst()
+            q.addLast(frame.copyOf())
+        }
+        mainHandler.post { drainNotifyQueue(device) }
+        return true
+    }
+
+    private fun drainNotifyQueue(device: BluetoothDevice) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { drainNotifyQueue(device) }
+            return
+        }
         val server = gattServer ?: return
         if (!notifyDevices.contains(device)) return
-        sendNotify(server, device, frame)
+        val key = deviceKey(device)
+        val frame = synchronized(notifyLock) {
+            if (notifyInFlight[key] == true) return
+            val q = notifyQueues[key] ?: return
+            val next = q.removeFirstOrNull() ?: return
+            notifyInFlight[key] = true
+            next
+        }
+        if (!sendNotify(server, device, frame)) {
+            synchronized(notifyLock) {
+                notifyInFlight[key] = false
+                notifyQueues.getOrPut(key) { ArrayDeque() }.addFirst(frame)
+            }
+            scheduleNotifyRetryOrFail(device, "notify busy")
+        }
     }
 
     @Suppress("DEPRECATION")
-    private fun sendNotify(server: BluetoothGattServer, device: BluetoothDevice, frame: ByteArray) {
+    private fun sendNotify(server: BluetoothGattServer, device: BluetoothDevice, frame: ByteArray): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            server.notifyCharacteristicChanged(device, packetOutChar, false, frame)
+            val status = server.notifyCharacteristicChanged(device, packetOutChar, false, frame)
+            status == BluetoothStatusCodes.SUCCESS
         } else {
             packetOutChar.value = frame
             server.notifyCharacteristicChanged(device, packetOutChar, false)
         }
+
+    private fun markDeviceUnreachable(device: BluetoothDevice, reason: String) {
+        if (!notifyDevices.remove(device)) return
+        clearNotifyState(device)
+        Log.w(TAG, "Device unreachable: ${device.address} reason=$reason")
+        onLog?.invoke("device unreachable addr=${device.address} reason=$reason")
+        onDeviceUnreachable?.invoke(device, reason)
     }
+
+    private fun scheduleNotifyRetryOrFail(device: BluetoothDevice, reason: String) {
+        val key = deviceKey(device)
+        val failures = notifyFailures.merge(key, 1, Int::plus) ?: 1
+        if (failures >= MAX_NOTIFY_FAILURES) {
+            markDeviceUnreachable(device, "$reason after $failures attempts")
+            return
+        }
+        val delayMs = 100L * failures
+        onLog?.invoke("notify retry addr=${device.address} reason=$reason attempt=$failures")
+        mainHandler.postDelayed({ drainNotifyQueue(device) }, delayMs)
+    }
+
+    private fun clearNotifyState(device: BluetoothDevice) {
+        val key = deviceKey(device)
+        synchronized(notifyLock) {
+            notifyQueues.remove(key)
+            notifyInFlight.remove(key)
+            notifyFailures.remove(key)
+        }
+    }
+
+    private fun deviceKey(device: BluetoothDevice): String = device.address
 
     fun close() {
         gattServer?.close()
         gattServer = null
         notifyDevices.clear()
+        synchronized(notifyLock) {
+            notifyQueues.clear()
+            notifyInFlight.clear()
+            notifyFailures.clear()
+        }
         Log.i(TAG, "GATT server closed")
     }
 
@@ -135,6 +216,7 @@ class BLEEdgeGattServer(
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "Device disconnected: ${device.address}")
                 notifyDevices.remove(device)
+                clearNotifyState(device)
                 onDeviceDisconnected?.invoke(device)
             }
         }
@@ -176,13 +258,26 @@ class BLEEdgeGattServer(
             if (descriptor.uuid == BLEEdgeUUIDs.CCCD) {
                 if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                     Log.i(TAG, "PACKET_OUT notifications enabled by ${device.address}")
-                    notifyDevices.add(device)
+                    if (!notifyDevices.contains(device)) notifyDevices.add(device)
+                    clearNotifyState(device)
                 } else {
                     notifyDevices.remove(device)
+                    clearNotifyState(device)
                 }
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }
+            }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            val key = deviceKey(device)
+            synchronized(notifyLock) { notifyInFlight[key] = false }
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                notifyFailures.remove(key)
+                drainNotifyQueue(device)
+            } else {
+                scheduleNotifyRetryOrFail(device, "notification failed status=$status")
             }
         }
     }

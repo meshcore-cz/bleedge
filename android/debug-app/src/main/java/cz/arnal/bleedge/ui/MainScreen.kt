@@ -328,6 +328,9 @@ private fun PeerCard(peer: PeerInfo) {
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                 Text(peer.nodeId.toHexString(), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (peer.degraded) {
+                        Text("degraded", color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
+                    }
                     if (peer.incoming) {
                         Text("incoming", color = MaterialTheme.colorScheme.secondary, fontSize = 11.sp)
                     }

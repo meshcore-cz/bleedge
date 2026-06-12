@@ -136,7 +136,7 @@ private fun ConnectionStatusSheet(
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                val traceTarget = peers.firstOrNull()?.nodeId?.toHex()
+                val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex()
                 FilledTonalButton(
                     onClick = { traceTarget?.let { onDismiss(); nav.openTrace(it) } },
                     enabled = traceTarget != null,
@@ -172,7 +172,10 @@ private fun ConnectionStatusSheet(
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 SignalDot(p.rssi, "rssi")
                                 Text(
-                                    "${if (p.incoming) "inbound" else "outbound"} · ${p.txPhy}",
+                                    listOf(
+                                        if (p.degraded) "degraded" else if (p.incoming) "inbound" else "outbound",
+                                        p.txPhy.toString(),
+                                    ).joinToString(" · "),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

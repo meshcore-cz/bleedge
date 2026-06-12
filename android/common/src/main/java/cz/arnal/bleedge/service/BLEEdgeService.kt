@@ -74,6 +74,12 @@ private const val NOTIFICATION_CHANNEL = "bleedge"
 private const val NOTIFICATION_ID = 1
 private const val EPOCH_PREFS = "bleedge_node"
 private const val EPOCH_KEY = "announce_epoch"
+private const val MAX_OUTGOING_LINKS = 4
+private const val MAX_CONNECTING_LINKS = 1
+private const val CONNECT_TIMEOUT_MS = 20_000L
+private const val CONNECTION_CANDIDATE_TTL_MS = 45_000L
+private const val RECONNECT_BASE_DELAY_MS = 5_000L
+private const val RECONNECT_MAX_DELAY_MS = 90_000L
 
 /** Sentinel for "RSSI not measurable" (e.g. inbound GATT-server peers). */
 const val RSSI_UNKNOWN = Int.MIN_VALUE
@@ -87,6 +93,7 @@ data class PeerInfo(
     val rxPhy: PHY,
     val caps: Capabilities,
     val incoming: Boolean = false,
+    val degraded: Boolean = false,
     val name: String = "",
     val publicKey: ByteArray = ByteArray(0),
 )
@@ -116,6 +123,7 @@ data class ReceivedMessage(
     val meshCoreRoute: String? = null,
     val meshCoreHops: Int = 0,
     val meshCorePacketId: String? = null,
+    val sentAtMs: Long = 0L,
     val timestampMs: Long = System.currentTimeMillis(),
 )
 
@@ -234,6 +242,17 @@ class BLEEdgeService : Service() {
     // Incoming connections (peer is client to our server): BLE MAC hex -> direct peer NodeId (or null).
     private val serverPeers = ConcurrentHashMap<String, NodeId?>()
     private val serverPeerDevices = ConcurrentHashMap<String, BluetoothDevice>()
+    private data class ConnectionCandidate(
+        val device: BluetoothDevice,
+        val rssi: Int,
+        val advertisedNodeId: NodeId?,
+        val lastSeenMs: Long = System.currentTimeMillis(),
+    )
+    private val connectionLock = Any()
+    private val connectionCandidates = LinkedHashMap<String, ConnectionCandidate>()
+    private val connectingPeers = ConcurrentHashMap<String, Long>()
+    private val reconnectAfterMs = ConcurrentHashMap<String, Long>()
+    private val connectionFailures = ConcurrentHashMap<String, Int>()
 
     private var identity: Identity? = null
     private var epoch: Long = 0
@@ -372,7 +391,7 @@ class BLEEdgeService : Service() {
         this.identity = identity
         val localId = identity.nodeId
 
-        peers.clear(); serverPeers.clear(); serverPeerDevices.clear()
+        peers.clear(); serverPeers.clear(); serverPeerDevices.clear(); resetConnectionManager()
         _connectedPeers.value = emptyList()
         _receivedMessages.value = emptyList()
         _routingLog.value = emptyList()
@@ -420,12 +439,10 @@ class BLEEdgeService : Service() {
                 log("device connected addr=${device.address}", LogTag.SERVER)
             },
             onDeviceDisconnected = { device ->
-                val addrHex = device.address.replace(":", "")
-                val nid = serverPeers.remove(addrHex)
-                serverPeerDevices.remove(addrHex)
-                nid?.let { router.neighbors.remove(it) }
-                log("device disconnected addr=${device.address} node=${nid?.toHex() ?: "unknown"}", LogTag.SERVER)
-                updatePeersState()
+                removeServerPeer(device, "disconnected")
+            },
+            onDeviceUnreachable = { device, reason ->
+                removeServerPeer(device, reason)
             },
             onLog = { msg -> log(msg, LogTag.SERVER) },
         )
@@ -453,52 +470,176 @@ class BLEEdgeService : Service() {
 
     // ---- discovery / connection ----------------------------------------------
 
+    private fun removeServerPeer(device: BluetoothDevice, reason: String) {
+        val addrHex = device.address.replace(":", "")
+        val nid = serverPeers.remove(addrHex)
+        serverPeerDevices.remove(addrHex)
+        nid?.let { router.neighbors.remove(it) }
+        log("device $reason addr=${device.address} node=${nid?.toHex() ?: "unknown"}", LogTag.SERVER)
+        updatePeersState()
+    }
+
+    private fun removePeerLink(addrHex: String, link: BLEPeerLink, reason: String) {
+        if (!peers.remove(addrHex, link)) return
+        connectingPeers.remove(addrHex)
+        link.peerId?.let { router.neighbors.remove(it) }
+        link.disconnect()
+        log("peer removed reason=$reason addr=$addrHex node=${link.peerId?.toHex() ?: "unknown"}", LogTag.PEER)
+        updatePeersState()
+        if (_isRunning.value) scheduleConnectionDrain(RECONNECT_BASE_DELAY_MS)
+    }
+
     private fun handleFoundDevice(device: BluetoothDevice, rssi: Int, advNodeId: NodeId?) {
         val peerHex = device.address.replace(":", "")
-        if (peers.containsKey(peerHex)) return
         val localId = _nodeId.value
+        if (advNodeId == localId) return
 
-        if (advNodeId != null) {
-            if (advNodeId == localId) return
-            if (peers.values.any { it.peerId == advNodeId }) return
-            if (serverPeers.values.any { it == advNodeId }) return
-            log("scan found node=${advNodeId.toHex()} addr=${device.address} rssi=$rssi — connecting", LogTag.SCAN)
-        } else {
-            log("scan found addr=${device.address} rssi=$rssi (no adv nodeId) — connecting", LogTag.SCAN)
+        val wasNew = synchronized(connectionLock) {
+            val previous = connectionCandidates.put(
+                peerHex,
+                ConnectionCandidate(device = device, rssi = rssi, advertisedNodeId = advNodeId),
+            )
+            previous == null
+        }
+        if (wasNew) {
+            log(
+                if (advNodeId != null) "scan candidate node=${advNodeId.toHex()} addr=${device.address} rssi=$rssi"
+                else "scan candidate addr=${device.address} rssi=$rssi (no adv nodeId)",
+                LogTag.SCAN,
+            )
+        }
+        scheduleConnectionDrain()
+    }
+
+    private fun resetConnectionManager() {
+        synchronized(connectionLock) {
+            connectionCandidates.clear()
+        }
+        connectingPeers.clear()
+        reconnectAfterMs.clear()
+        connectionFailures.clear()
+    }
+
+    private fun scheduleConnectionDrain(delayMs: Long = 0) {
+        scope.launch {
+            if (delayMs > 0) delay(delayMs)
+            drainConnectionQueue()
+        }
+    }
+
+    private fun drainConnectionQueue() {
+        if (!_isRunning.value) return
+        val now = System.currentTimeMillis()
+        val timedOut = mutableListOf<Pair<String, BLEPeerLink>>()
+        val toStart = mutableListOf<ConnectionCandidate>()
+
+        synchronized(connectionLock) {
+            for ((addrHex, startedAt) in connectingPeers.entries.toList()) {
+                if (now - startedAt <= CONNECT_TIMEOUT_MS) continue
+                connectingPeers.remove(addrHex)
+                peers.remove(addrHex)?.let { timedOut += addrHex to it }
+                recordConnectionBackoffLocked(addrHex, now)
+            }
+
+            connectionCandidates.entries.removeAll { now - it.value.lastSeenMs > CONNECTION_CANDIDATE_TTL_MS }
+
+            val usableOutgoing = peers.values.count { it.isUsable }
+            val slots = minOf(
+                MAX_OUTGOING_LINKS - usableOutgoing - connectingPeers.size,
+                MAX_CONNECTING_LINKS - connectingPeers.size,
+            )
+            if (slots > 0) {
+                val selected = connectionCandidates.values
+                    .filter { isConnectionCandidateEligibleLocked(it, now) }
+                    .sortedWith(
+                        compareByDescending<ConnectionCandidate> { it.advertisedNodeId != null }
+                            .thenByDescending { it.rssi }
+                            .thenBy { it.device.address }
+                    )
+                    .take(slots)
+                for (candidate in selected) {
+                    val addrHex = candidate.device.address.replace(":", "")
+                    connectionCandidates.remove(addrHex)
+                    connectingPeers[addrHex] = now
+                    toStart += candidate
+                }
+            }
         }
 
+        for ((addrHex, link) in timedOut) {
+            link.disconnect()
+            log("connect timeout addr=$addrHex; cooling down", LogTag.PEER)
+        }
+        for (candidate in toStart) startOutgoingConnection(candidate)
+        if (timedOut.isNotEmpty()) scheduleConnectionDrain(RECONNECT_BASE_DELAY_MS)
+    }
+
+    private fun isConnectionCandidateEligibleLocked(candidate: ConnectionCandidate, now: Long): Boolean {
+        val addrHex = candidate.device.address.replace(":", "")
+        if (peers.containsKey(addrHex) || connectingPeers.containsKey(addrHex)) return false
+        if ((reconnectAfterMs[addrHex] ?: 0L) > now) return false
+        val advNodeId = candidate.advertisedNodeId
+        if (advNodeId != null) {
+            if (advNodeId == _nodeId.value) return false
+            if (peers.values.any { it.peerId == advNodeId }) return false
+            if (serverPeers.values.any { it == advNodeId }) return false
+        }
+        return true
+    }
+
+    private fun startOutgoingConnection(candidate: ConnectionCandidate) {
+        val device = candidate.device
+        val peerHex = device.address.replace(":", "")
+        val localId = _nodeId.value
+        log(
+            if (candidate.advertisedNodeId != null)
+                "connecting candidate node=${candidate.advertisedNodeId.toHex()} addr=${device.address} rssi=${candidate.rssi}"
+            else "connecting candidate addr=${device.address} rssi=${candidate.rssi}",
+            LogTag.SCAN,
+        )
         val client = BLEEdgeGattClient(
             context = this,
             phyMode = _phyMode.value,
-            initialRssi = rssi,
+            initialRssi = candidate.rssi,
             onPhyUpdate = { _, _ -> updatePeersState() },
             onFrameReceived = { frame -> handleIncomingFrame(frame, device) },
             onDisconnected = {
+                val wasConnecting = connectingPeers.remove(peerHex) != null
                 val link = peers.remove(peerHex)
                 if (link != null) {
                     link.peerId?.let { router.neighbors.remove(it) }
                     log("peer disconnected addr=$peerHex node=${link.peerId?.toHex()}", LogTag.PEER)
                     updatePeersState()
                 }
+                if (_isRunning.value && (wasConnecting || link != null)) {
+                    recordConnectionBackoff(peerHex)
+                    scheduleConnectionDrain()
+                }
             },
             onLog = { addr, msg -> log("gatt addr=$addr $msg", LogTag.GATT) },
             onNodeInfoRead = { peerId, peerPubKey, caps ->
-                router.neighbors.upsert(ProtoNeighbor(id = peerId, publicKey = peerPubKey, rssi = rssi, provisionalCaps = caps))
+                connectingPeers.remove(peerHex)
+                connectionFailures.remove(peerHex)
+                reconnectAfterMs.remove(peerHex)
+                router.neighbors.upsert(ProtoNeighbor(id = peerId, publicKey = peerPubKey, rssi = candidate.rssi, provisionalCaps = caps))
                 refreshTopologyState()
                 val dupOutgoing = peers.entries.any { (key, link) -> key != peerHex && link.peerId == peerId }
                 val haveInbound = serverPeers.values.any { it == peerId }
                 when {
                     dupOutgoing -> {
                         log("peer=${peerId.toHex()} already outbound on another link; dropping addr=$peerHex", LogTag.PEER)
+                        scheduleConnectionDrain()
                         peers.remove(peerHex); false
                     }
                     haveInbound && localId >= peerId -> {
                         log("peer=${peerId.toHex()} inbound and we are larger — keeping inbound", LogTag.PEER)
+                        scheduleConnectionDrain()
                         peers.remove(peerHex); false
                     }
                     else -> {
                         log("connected to peer=${peerId.toHex()} caps=$caps", LogTag.PEER)
                         scope.launch { sendAnnounce() }
+                        scheduleConnectionDrain()
                         updatePeersState(); true
                     }
                 }
@@ -506,6 +647,21 @@ class BLEEdgeService : Service() {
         )
         peers[peerHex] = BLEPeerLink(client)
         scope.launch(Dispatchers.Main) { client.connect(device) }
+        scheduleConnectionDrain(CONNECT_TIMEOUT_MS + 500)
+    }
+
+    private fun recordConnectionBackoff(addrHex: String) {
+        synchronized(connectionLock) { recordConnectionBackoffLocked(addrHex, System.currentTimeMillis()) }
+    }
+
+    private fun recordConnectionBackoffLocked(addrHex: String, now: Long) {
+        val failures = (connectionFailures[addrHex] ?: 0) + 1
+        connectionFailures[addrHex] = failures
+        val delayMs = (RECONNECT_BASE_DELAY_MS shl (failures - 1).coerceAtMost(4))
+            .coerceAtMost(RECONNECT_MAX_DELAY_MS)
+        reconnectAfterMs[addrHex] = now + delayMs
+        connectionCandidates.remove(addrHex)
+        log("connection backoff addr=$addrHex failures=$failures delay=${delayMs}ms", LogTag.PEER)
     }
 
     // ---- receive path --------------------------------------------------------
@@ -578,7 +734,8 @@ class BLEEdgeService : Service() {
     private fun learnNeighbor(directPeer: NodeId?, addrHex: String, device: BluetoothDevice) {
         if (directPeer == null) return
         // Register/refresh inbound server peers so we can notify them back.
-        val isOutgoing = peers[addrHex]?.peerId == directPeer || peers.values.any { it.peerId == directPeer }
+        val isOutgoing = peers[addrHex]?.let { it.peerId == directPeer && it.isUsable } == true ||
+            peers.values.any { it.peerId == directPeer && it.isUsable }
         if (!isOutgoing) {
             if (serverPeers[addrHex] != directPeer) {
                 serverPeers[addrHex] = directPeer
@@ -717,13 +874,13 @@ class BLEEdgeService : Service() {
         val ctx = ChatContext(dg.id, dg.source, dg.destination)
         val msg = when (Chat.peekKind(dg.payload)) {
             ChatKind.PUBLIC_TEXT -> ChatPublicText.open(dg.payload, ctx)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.PUBLIC_TEXT, it.text, it.senderPublicKey, path = dg.path)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.PUBLIC_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
             }
             ChatKind.DIRECT_TEXT -> ChatDirectText.open(id, dg.payload, ctx)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.DIRECT_TEXT, it.text, it.senderPublicKey, path = dg.path)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.DIRECT_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
             }
             ChatKind.TYPING -> ChatTyping.open(dg.payload, ctx)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.TYPING, isTyping = true, senderPublicKey = it.senderPublicKey, path = dg.path)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.TYPING, isTyping = true, senderPublicKey = it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
             }
             ChatKind.CHANNEL_TEXT -> ChatChannel.channelPayload(dg.payload)?.let {
                 ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.CHANNEL_TEXT, channelPayload = it, path = dg.path)
@@ -785,26 +942,54 @@ class BLEEdgeService : Service() {
     private fun framesFor(dg: Datagram): List<Frame> = Frame.fragment(dg.encode(), BLEEdge.MAX_FRAME_SIZE)
 
     private fun sendFramesToAll(frames: List<Frame>, exclude: NodeId? = null) {
-        for (link in peers.values) {
+        for ((addrHex, link) in peers) {
             if (link.peerId != null && link.peerId == exclude) continue
-            for (f in frames) link.sendFrame(f.encode())
+            if (!link.isUsable) {
+                continue
+            }
+            for (f in frames) {
+                if (!link.sendFrame(f.encode())) {
+                    removePeerLink(addrHex, link, "send rejected")
+                    break
+                }
+            }
         }
         val server = bleGattServer ?: return
         for ((addrHex, nid) in serverPeers) {
             if (nid == null || nid == exclude) continue
             val device = serverPeerDevices[addrHex] ?: continue
-            for (f in frames) server.notifyFrameTo(f.encode(), device)
+            for (f in frames) {
+                if (!server.notifyFrameTo(f.encode(), device)) {
+                    removeServerPeer(device, "notify failed")
+                    break
+                }
+            }
         }
     }
 
     private fun sendFramesToPeer(frames: List<Frame>, nodeId: NodeId): Boolean {
-        peers.values.firstOrNull { it.peerId == nodeId }?.let { link ->
-            for (f in frames) link.sendFrame(f.encode()); return true
+        peers.entries.firstOrNull { it.value.peerId == nodeId }?.let { (addrHex, link) ->
+            if (!link.isUsable) {
+                log("send-to-peer: peer ${nodeId.toHex()} not ready addr=$addrHex", LogTag.ROUTER)
+                return false
+            }
+            for (f in frames) {
+                if (!link.sendFrame(f.encode())) {
+                    removePeerLink(addrHex, link, "send rejected")
+                    return false
+                }
+            }
+            return true
         }
         val server = bleGattServer ?: return false
         val entry = serverPeers.entries.firstOrNull { it.value == nodeId } ?: return false
         val device = serverPeerDevices[entry.key] ?: return false
-        for (f in frames) server.notifyFrameTo(f.encode(), device)
+        for (f in frames) {
+            if (!server.notifyFrameTo(f.encode(), device)) {
+                removeServerPeer(device, "notify failed")
+                return false
+            }
+        }
         return true
     }
 
@@ -1021,12 +1206,14 @@ class BLEEdgeService : Service() {
     }
 
     fun stopBLE() {
+        _isRunning.value = false
+        resetConnectionManager()
         bleAdvertiser?.stopAdvertising()
         bleScanner?.stopScan()
         peers.values.forEach { it.disconnect() }
         peers.clear(); serverPeers.clear(); serverPeerDevices.clear()
         _connectedPeers.value = emptyList()
-        _advertisingActive.value = false; _scanningActive.value = false; _isRunning.value = false
+        _advertisingActive.value = false; _scanningActive.value = false
         log("BLE stopped", LogTag.SYS)
     }
 
@@ -1041,6 +1228,7 @@ class BLEEdgeService : Service() {
             onFailed = { errorCode -> log("scan FAILED errorCode=$errorCode", LogTag.SCAN) },
         )
         _scanningActive.value = true; _isRunning.value = true
+        scheduleConnectionDrain()
         log("BLE started", LogTag.SYS)
     }
 
@@ -1051,6 +1239,13 @@ class BLEEdgeService : Service() {
         val list = mutableListOf<PeerInfo>()
         for (link in peers.values) {
             val pid = link.peerId ?: continue
+            if (!link.isUsable) {
+                if (!seen.add(pid.toHex())) continue
+                router.neighbors.remove(pid)
+                list += PeerInfo(pid, link.rssi, link.txPhy, link.rxPhy, link.caps, degraded = true,
+                    name = router.nameFor(pid), publicKey = link.publicKey)
+                continue
+            }
             if (!seen.add(pid.toHex())) continue
             router.neighbors.upsert(ProtoNeighbor(id = pid, publicKey = link.publicKey, rssi = link.rssi, provisionalCaps = link.caps))
             list += PeerInfo(pid, link.rssi, link.txPhy, link.rxPhy, link.caps, name = router.nameFor(pid), publicKey = link.publicKey)

@@ -52,10 +52,11 @@ class BLEManager(
         onFrameReceived: (ByteArray, android.bluetooth.BluetoothDevice) -> Unit,
         onDeviceConnected: ((android.bluetooth.BluetoothDevice) -> Unit)? = null,
         onDeviceDisconnected: ((android.bluetooth.BluetoothDevice) -> Unit)? = null,
+        onDeviceUnreachable: ((android.bluetooth.BluetoothDevice, String) -> Unit)? = null,
         onLog: ((String) -> Unit)? = null,
     ): BLEEdgeGattServer {
         return BLEEdgeGattServer(context, pubKey, caps, onFrameReceived,
-            onDeviceConnected, onDeviceDisconnected, onLog).also { gattServer = it }
+            onDeviceConnected, onDeviceDisconnected, onDeviceUnreachable, onLog).also { gattServer = it }
     }
 
     fun stopAll() {

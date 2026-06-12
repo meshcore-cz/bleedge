@@ -225,6 +225,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
     val typingPeers: StateFlow<Set<String>> = _typingPeers.asStateFlow()
     private val typingExpiry = mutableMapOf<String, Job>()
+    private val lastRealMessageSentAtMs = mutableMapOf<String, Long>()
 
     // Outgoing typing: a single loop re-sends a hint every 10s for the peer we're typing to.
     private var outgoingTypingJob: Job? = null
@@ -665,13 +666,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         when (msg.chatKind) {
             ChatKind.DIRECT_TEXT -> handleIncomingDm(msg)
             ChatKind.CHANNEL_TEXT -> handleIncomingChannel(msg)
-            ChatKind.TYPING -> showTyping(msg.fromNodeId.toHex())
+            ChatKind.TYPING -> showTyping(msg.fromNodeId.toHex(), msg.sentAtMs)
             else -> return // PUBLIC_TEXT / other: not part of the direct/channel chat model
         }
     }
 
     /** Marks [peerHex] as typing and (re)arms a timer to clear it if no fresh hint arrives. */
-    private fun showTyping(peerHex: String) {
+    private fun showTyping(peerHex: String, sentAtMs: Long) {
+        val lastReal = lastRealMessageSentAtMs[peerHex] ?: 0L
+        if (sentAtMs > 0L && lastReal > 0L && sentAtMs <= lastReal) return
         _typingPeers.value = _typingPeers.value + peerHex
         typingExpiry.remove(peerHex)?.cancel()
         // A bit longer than the sender's 10s resend so a steady typist stays "typing".
@@ -689,6 +692,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun handleIncomingDm(msg: ReceivedMessage) {
         if (!processed.add(msg.datagramId.toHex())) return
         val peer = msg.fromNodeId.toHex()
+        if (msg.sentAtMs > 0L) {
+            lastRealMessageSentAtMs[peer] = maxOf(lastRealMessageSentAtMs[peer] ?: 0L, msg.sentAtMs)
+        }
         // A real message means they're no longer typing — drop the indicator at once.
         clearTyping(peer)
         dao.insertMessage(

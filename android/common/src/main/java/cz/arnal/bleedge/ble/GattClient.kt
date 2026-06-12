@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import android.os.Handler
@@ -19,9 +20,10 @@ import cz.arnal.bleedge.transport.PHY
 import cz.arnal.bleedge.transport.PHYMode
 
 private const val TAG = "BLEEdgeGattClient"
-private const val KEEPALIVE_MS = 10_000L
-// Safety release for the write queue in case onCharacteristicWrite doesn't fire.
-private const val WRITE_TIMEOUT_MS = 200L
+private const val KEEPALIVE_MS = 15_000L
+private const val WRITE_TIMEOUT_MS = 8_000L
+
+enum class LinkHealth { CONNECTING, READY, DEGRADED, CLOSED }
 
 /**
  * GATT client: connects to a remote BLEEdge peer and manages the full characteristic lifecycle.
@@ -47,10 +49,15 @@ class BLEEdgeGattClient(
     @Volatile private var gatt: BluetoothGatt? = null
     /** Set to true when we intentionally disconnect so the state-change callback skips cleanup. */
     @Volatile private var intentionalDisconnect = false
+    @Volatile private var closing = false
+    @Volatile var health: LinkHealth = LinkHealth.CONNECTING
+        private set
+    val isUsable: Boolean get() = health == LinkHealth.READY && gatt != null && packetInChar != null
 
     // Write queue — only touched on mainHandler thread.
     private val writeQueue = ArrayDeque<ByteArray>()
     private var writeInProgress = false
+    private var writeGeneration = 0L
 
     var peerNodeId: NodeId? = null; private set
     var peerPublicKey: ByteArray = ByteArray(0); private set
@@ -69,6 +76,8 @@ class BLEEdgeGattClient(
     /** Must be called on the main thread. */
     fun connect(device: BluetoothDevice) {
         intentionalDisconnect = false
+        closing = false
+        health = LinkHealth.CONNECTING
         Log.i(TAG, "Connecting to ${device.address}")
         onLog?.invoke(device.address, "connecting")
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -78,9 +87,7 @@ class BLEEdgeGattClient(
     fun disconnect() {
         intentionalDisconnect = true
         mainHandler.post {
-            stopKeepalive()
-            writeQueue.clear()
-            writeInProgress = false
+            closeLink()
             val g = gatt
             if (g != null) {
                 g.disconnect()
@@ -90,26 +97,31 @@ class BLEEdgeGattClient(
     }
 
     /** Thread-safe. Enqueues a frame; frames are written one at a time using Write Request. */
-    fun sendFrame(frame: ByteArray) {
+    fun sendFrame(frame: ByteArray): Boolean {
+        if (!isUsable) return false
         mainHandler.post {
+            if (!isUsable) return@post
             writeQueue.addLast(frame.copyOf())
             drainWriteQueue()
         }
+        return true
     }
 
     // ---- write queue ---------------------------------------------------------
 
     private fun drainWriteQueue() {
-        if (writeInProgress) return
+        if (closing || !isUsable || writeInProgress) return
         val frame = writeQueue.removeFirstOrNull() ?: return
-        val char = packetInChar ?: run { writeQueue.clear(); return }
-        val g = gatt ?: run { writeQueue.clear(); return }
+        val char = packetInChar ?: run { failLink("PACKET_IN unavailable while writing"); return }
+        val g = gatt ?: run { failLink("GATT unavailable while writing"); return }
 
         writeInProgress = true
+        val generation = ++writeGeneration
 
         // Use Write Request (WRITE_TYPE_DEFAULT) for reliable serialisation via onCharacteristicWrite.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            g.writeCharacteristic(char, frame, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = g.writeCharacteristic(char, frame, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            status == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
@@ -118,13 +130,14 @@ class BLEEdgeGattClient(
             @Suppress("DEPRECATION")
             g.writeCharacteristic(char)
         }
+        if (!accepted) {
+            failLink("write request rejected")
+            return
+        }
 
-        // Safety: release the queue lock if the callback never fires.
+        // Missing write callbacks usually mean the controller has lost the peer.
         mainHandler.postDelayed({
-            if (writeInProgress) {
-                writeInProgress = false
-                drainWriteQueue()
-            }
+            if (writeInProgress && writeGeneration == generation) failLink("write callback timeout")
         }, WRITE_TIMEOUT_MS)
     }
 
@@ -139,8 +152,35 @@ class BLEEdgeGattClient(
     }
 
     private fun keepaliveTick() {
-        gatt?.readRemoteRssi()
+        if (closing || health == LinkHealth.CLOSED) return
+        val accepted = gatt?.readRemoteRssi() == true
+        if (!accepted) {
+            onLog?.invoke(peerNodeId?.toHex() ?: "unknown", "RSSI keepalive request skipped")
+        }
         mainHandler.postDelayed(::keepaliveTick, KEEPALIVE_MS)
+    }
+
+    private fun failLink(reason: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { failLink(reason) }
+            return
+        }
+        val g = gatt
+        val addr = g?.device?.address ?: peerNodeId?.toHex() ?: "unknown"
+        Log.w(TAG, "Failing link $addr: $reason")
+        onLog?.invoke(addr, "link failed: $reason")
+        closeLink()
+        onDisconnected?.invoke()
+        g?.disconnect()
+    }
+
+    private fun closeLink() {
+        closing = true
+        health = LinkHealth.CLOSED
+        stopKeepalive()
+        writeQueue.clear()
+        writeInProgress = false
+        writeGeneration += 1
     }
 
     // ---- GATT callbacks ------------------------------------------------------
@@ -153,6 +193,10 @@ class BLEEdgeGattClient(
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "Connected to $addr status=$status")
                     onLog?.invoke(addr, "connected status=$status, requesting MTU=512")
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        failLink("connect failed status=$status")
+                        return
+                    }
                     if (intentionalDisconnect) { gatt.disconnect(); return }
                     gatt.requestMtu(512)
                 }
@@ -160,9 +204,7 @@ class BLEEdgeGattClient(
                     Log.i(TAG, "Disconnected from $addr status=$status")
                     onLog?.invoke(addr, "disconnected status=$status")
                     mainHandler.post {
-                        stopKeepalive()
-                        writeQueue.clear()
-                        writeInProgress = false
+                        closeLink()
                         gatt.close()
                         this@BLEEdgeGattClient.gatt = null
                         // Fire callback regardless of whether disconnect was intentional —
@@ -220,7 +262,10 @@ class BLEEdgeGattClient(
             status: Int,
         ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return // handled below
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failLink("characteristic read failed status=$status")
+                return
+            }
             handleNodeInfo(gatt, characteristic.value ?: return)
         }
 
@@ -231,7 +276,10 @@ class BLEEdgeGattClient(
             value: ByteArray,
             status: Int,
         ) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failLink("characteristic read failed status=$status")
+                return
+            }
             handleNodeInfo(gatt, value)
         }
 
@@ -284,7 +332,8 @@ class BLEEdgeGattClient(
         ) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Write failed status=$status on ${gatt.device.address}")
-                onLog?.invoke(gatt.device.address, "write failed status=$status")
+                failLink("write failed status=$status")
+                return
             }
             mainHandler.post {
                 writeInProgress = false
@@ -306,6 +355,8 @@ class BLEEdgeGattClient(
             }
             Log.i(TAG, "Subscribed to PACKET_OUT on $addr")
             onLog?.invoke(addr, "subscribed to PACKET_OUT, requesting PHY")
+            health = LinkHealth.READY
+            closing = false
             startKeepalive()
             val phyMask = when (phyMode) {
                 PHYMode.ONE_M           -> BluetoothDevice.PHY_LE_1M_MASK
@@ -324,7 +375,11 @@ class BLEEdgeGattClient(
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssiValue: Int, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) rssi = rssiValue
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                rssi = rssiValue
+            } else {
+                onLog?.invoke(gatt.device.address, "RSSI read failed status=$status")
+            }
         }
     }
 
