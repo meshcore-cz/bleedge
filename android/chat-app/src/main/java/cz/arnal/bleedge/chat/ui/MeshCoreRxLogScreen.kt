@@ -1,5 +1,7 @@
 package cz.arnal.bleedge.chat.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -235,13 +239,52 @@ private fun meshCoreMeta(env: MeshCoreEnvelope?): String {
 
 @Composable
 internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val analyzers by vm.analyzerUrls.collectAsState()
+    // CoreScope content hash — route-independent logical packet id, used for the analyzer link.
+    val contentHash by produceState<String?>(initialValue = null, p.raw) {
+        value = vm.meshContentHash(p.raw)
+    }
+    var showAnalyzerChooser by remember { mutableStateOf(false) }
+    fun openAnalyzer(base: String) {
+        val hash = contentHash ?: return
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(base + hash)))
+        }
+    }
+
+    if (showAnalyzerChooser) {
+        AlertDialog(
+            onDismissRequest = { showAnalyzerChooser = false },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showAnalyzerChooser = false }) { Text("Cancel") } },
+            title = { Text("Open in analyzer") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    analyzers.forEach { base ->
+                        TextButton(onClick = { showAnalyzerChooser = false; openAnalyzer(base) }) {
+                            Text(base, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            },
+        )
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = {
+            OutlinedButton(
+                enabled = contentHash != null,
+                onClick = { if (analyzers.size <= 1) openAnalyzer(analyzers.firstOrNull() ?: return@OutlinedButton) else showAnalyzerChooser = true },
+            ) { Text("Open in analyzer") }
+        },
         title = { Text("MeshCore packet") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 McField("Time", mcTimeFmt.format(Date(p.timestampMs)))
+                McField("Content hash", contentHash ?: "—")
                 if (p.contentId.isNotBlank()) McField("Packet id", p.contentId)
                 val env = p.envelope
                 if (env == null) {

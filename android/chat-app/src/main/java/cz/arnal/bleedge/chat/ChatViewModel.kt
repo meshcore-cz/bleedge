@@ -36,6 +36,7 @@ import cz.arnal.bleedge.protocol.PayloadProtocol
 import cz.arnal.bleedge.protocol.TraceResponseBody
 import cz.arnal.bleedge.transport.PHYMode
 import cz.arnal.bleedge.meshcore.MeshCoreAdvert
+import cz.arnal.bleedge.meshcore.MeshCoreCodec
 import cz.arnal.bleedge.service.BLEEdgeService
 import cz.arnal.bleedge.service.LogEntry
 import cz.arnal.bleedge.service.MeshStats
@@ -72,6 +73,10 @@ private val FLOOD_TTL_KEY = intPreferencesKey("flood_ttl")
 private val PHY_MODE_KEY = stringPreferencesKey("phy_mode")
 private val AVATAR_STYLE_KEY = stringPreferencesKey("avatar_style")
 private val THEME_KEY = stringPreferencesKey("theme_mode")
+private val ANALYZER_URLS_KEY = stringPreferencesKey("analyzer_urls") // newline-separated base URLs
+
+/** Default MeshCore packet analyzer base URL; the content hash is appended. */
+const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
 
 /** How long a discovered contact survives after it was last heard advertising. */
 private const val DISCOVERED_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
@@ -254,6 +259,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Hop limit (TTL) applied to messages we originate — how far they flood across the mesh. */
     private val _floodTtl = MutableStateFlow(BLEEdge.DEFAULT_FLOOD_TTL)
     val floodTtl: StateFlow<Int> = _floodTtl.asStateFlow()
+
+    // Configured MeshCore packet-analyzer base URLs (content hash appended). Defaults to one entry.
+    private val _analyzerUrls = MutableStateFlow(listOf(DEFAULT_ANALYZER_URL))
+    val analyzerUrls: StateFlow<List<String>> = _analyzerUrls.asStateFlow()
 
     private val _avatarStyle = MutableStateFlow(AvatarStyle.IDENTICON)
     val avatarStyle: StateFlow<AvatarStyle> = _avatarStyle.asStateFlow()
@@ -591,6 +600,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _floodTtl.value = (pref[FLOOD_TTL_KEY] ?: BLEEdge.DEFAULT_FLOOD_TTL).coerceIn(1, BLEEdge.MAX_TTL)
         _avatarStyle.value = AvatarStyle.fromValue(pref[AVATAR_STYLE_KEY])
         _themeMode.value = ThemeMode.fromValue(pref[THEME_KEY])
+        _analyzerUrls.value = parseAnalyzerUrls(pref[ANALYZER_URLS_KEY])
 
         val identity = Identity.fromSeed(seedHex.hexToBytes())
         service.initialize(identity, phy, emptySet(), desc, nodeName, retryDelay.toLong(), maxTries)
@@ -1424,6 +1434,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The CoreScope-compatible MeshCore content hash of a raw inner packet, or null if undecodable. */
+    fun meshContentHash(raw: ByteArray): String? = MeshCoreCodec.computeContentHash(raw)
+
+    /**
+     * Saves the configured packet-analyzer base URLs (one per line in [text]). Blank input restores
+     * the single default. The MeshCore content hash is appended to a chosen base to form the link.
+     */
+    fun setAnalyzerUrls(text: String) {
+        val list = parseAnalyzerUrls(text)
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[ANALYZER_URLS_KEY] = list.joinToString("\n") }
+            _analyzerUrls.value = list
+        }
+    }
+
     /** Sets the user's display-name override (blank resets to the deterministic default). */
     fun setName(text: String) {
         val clean = text.trim()
@@ -1694,3 +1719,8 @@ fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 fun String.hexToBytes(): ByteArray = ByteArray(length / 2) { substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 fun shortHex(hex: String): String = if (hex.length >= 8) "node ${hex.take(8)}" else hex
 private fun List<NodeId>.toRouteHex(): String = joinToString(",") { it.toHex() }
+
+/** Parses analyzer base URLs (one per line), trimming blanks; falls back to the single default. */
+private fun parseAnalyzerUrls(stored: String?): List<String> =
+    stored.orEmpty().lines().map { it.trim() }.filter { it.isNotEmpty() }
+        .ifEmpty { listOf(DEFAULT_ANALYZER_URL) }

@@ -92,6 +92,19 @@ object MeshCoreCodec {
         parseEnvelopeJson(json)
     }.getOrNull()
 
+    /**
+     * Computes the CoreScope-compatible MeshCore content hash of a raw OTA packet — a
+     * route-independent logical packet identifier (16 lowercase hex chars), via meshpkt's
+     * `computeContentHash` op. Returns null if the packet can't be decoded.
+     */
+    fun computeContentHash(raw: ByteArray): String? = runCatching {
+        val args = JSONArray().put(raw.toHex())
+        val json = cz.meshcore.meshpkt.mobile.Mobile.call("computeContentHash", args.toString())
+        val o = JSONObject(json)
+        if (o.has("error")) return null
+        o.optString("hash", "").takeIf { it.isNotEmpty() }
+    }.getOrNull()
+
     /** Decodes an ADVERT payload (e.g. an envelope's payload when type==ADVERT), or null. */
     fun decodeAdvert(payload: ByteArray): MeshCoreAdvert? = runCatching {
         val args = JSONArray().put(payload.toHex())

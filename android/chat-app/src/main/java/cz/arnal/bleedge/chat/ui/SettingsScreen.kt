@@ -73,6 +73,7 @@ fun SettingsScreen(
     val dmRetryDelayMs by vm.dmRetryDelayMs.collectAsState()
     val dmMaxTries by vm.dmMaxTries.collectAsState()
     val floodTtl by vm.floodTtl.collectAsState()
+    val analyzerUrls by vm.analyzerUrls.collectAsState()
 
     val pubKeyHex = remember(seedHex) {
         runCatching { Identity.fromSeed(seedHex.hexToBytes()).publicKey.toHex() }.getOrDefault("")
@@ -84,6 +85,7 @@ fun SettingsScreen(
     var retryDelayDraft by remember(dmRetryDelayMs) { mutableStateOf((dmRetryDelayMs / 1000).toString()) }
     var triesDraft by remember(dmMaxTries) { mutableStateOf(dmMaxTries.toString()) }
     var ttlDraft by remember(floodTtl) { mutableStateOf(floodTtl.toString()) }
+    var analyzerDraft by remember(analyzerUrls) { mutableStateOf(analyzerUrls.joinToString("\n")) }
     var seedDraft by remember(seedHex) { mutableStateOf(seedHex) }
     var revealSeed by remember { mutableStateOf(false) }
     var seedError by remember { mutableStateOf(false) }
@@ -254,6 +256,37 @@ fun SettingsScreen(
                         onClick = { vm.setFloodTtl(ttlVal) },
                         enabled = ttlVal in 1..cz.arnal.bleedge.protocol.BLEEdge.MAX_TTL && ttlVal != floodTtl,
                     ) { Text("Save TTL") }
+                }
+            }
+
+            // MeshCore packet analyzer links
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Packet analyzer", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Base URLs for the \"Open in analyzer\" button on MeshCore packet details. The " +
+                            "packet's content hash is appended to the base. One per line; if you add more " +
+                            "than one, you'll be asked which to open.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = analyzerDraft,
+                        onValueChange = { analyzerDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Analyzer URLs (one per line)") },
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { vm.setAnalyzerUrls(analyzerDraft) },
+                            enabled = analyzerDraft.lines().map { it.trim() }.filter { it.isNotEmpty() } != analyzerUrls,
+                        ) { Text("Save") }
+                        OutlinedButton(onClick = {
+                            analyzerDraft = cz.arnal.bleedge.chat.DEFAULT_ANALYZER_URL
+                            vm.setAnalyzerUrls("")
+                        }) { Text("Reset") }
+                    }
                 }
             }
 
