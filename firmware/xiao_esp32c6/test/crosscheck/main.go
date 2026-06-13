@@ -18,7 +18,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 var (

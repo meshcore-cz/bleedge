@@ -9,14 +9,14 @@ import (
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 const (
 	leAdvertisementIface   = "org.bluez.LEAdvertisement1"
 	leAdvertisingManagerIF = "org.bluez.LEAdvertisingManager1"
 
-	advertisementPath = dbus.ObjectPath("/org/bleedge/advertisement0")
+	advertisementPath = dbus.ObjectPath("/org/sidepath/advertisement0")
 )
 
 // Advertiser registers a BlueZ LEAdvertisement1 D-Bus object and starts advertising.
@@ -114,10 +114,10 @@ func (adv *advertisement) GetAll(iface string) (map[string]dbus.Variant, *dbus.E
 	}
 	return map[string]dbus.Variant{
 		"Type":         dbus.MakeVariant("peripheral"),
-		"ServiceUUIDs": dbus.MakeVariant([]string{BLEEdgeServiceUUID}),
-		"LocalName":    dbus.MakeVariant("BLEEdge-" + adv.nodeID.String()[:8]),
+		"ServiceUUIDs": dbus.MakeVariant([]string{SidepathServiceUUID}),
+		"LocalName":    dbus.MakeVariant("Sidepath-" + adv.nodeID.String()[:8]),
 		"Discoverable": dbus.MakeVariant(true),
-		// Manufacturer data: [0xBE, 0xED] = custom BLEEdge company ID followed by node ID
+		// Manufacturer data: [0xBE, 0xED] = custom Sidepath company ID followed by node ID
 		"ManufacturerData": dbus.MakeVariant(map[uint16]dbus.Variant{
 			0xBEED: dbus.MakeVariant(adv.nodeID[:]),
 		}),

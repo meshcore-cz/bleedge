@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- BLE/foreground-service permissions and the BLEEdgeService are declared in the
+    <!-- BLE/foreground-service permissions and the SidepathService are declared in the
          :common library manifest and merged in. -->
     <!-- Camera is used only to scan MeshCore QR codes (channel/contact URIs). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
-        android:name="cz.arnal.bleedge.chat.ChatApp"
-        android:label="BLEEdge Chat"
+        android:name="cz.meshcore.meshward.ChatApp"
+        android:label="Meshward"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.BLEEdgeChat">
+        android:theme="@style/Theme.Meshward">
         <activity
-            android:name="cz.arnal.bleedge.chat.ChatActivity"
+            android:name="cz.meshcore.meshward.ChatActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">

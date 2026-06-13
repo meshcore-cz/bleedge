@@ -1,7 +1,7 @@
 package linux
 
 import (
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 // BLEPeerLink implements core.PeerLink using a GATT client connection.

@@ -8,21 +8,21 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 const (
 	deviceIface = "org.bluez.Device1"
 
-	// BLEEdge GATT service UUID
-	BLEEdgeServiceUUID = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a001"
+	// Sidepath GATT service UUID
+	SidepathServiceUUID = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a001"
 )
 
-// bleedgeCompanyID is the manufacturer (company) ID used to tag BLEEdge
+// sidepathCompanyID is the manufacturer (company) ID used to tag Sidepath
 // advertisements; the payload is the 8-byte NodeID.
-const bleedgeCompanyID = uint16(0xBEED)
+const sidepathCompanyID = uint16(0xBEED)
 
-// ScanResult represents a discovered BLEEdge peer device.
+// ScanResult represents a discovered Sidepath peer device.
 type ScanResult struct {
 	DevicePath dbus.ObjectPath
 	Address    string
@@ -36,7 +36,7 @@ type ScanResult struct {
 	HasNodeID bool
 }
 
-// Scanner watches for BLEEdge peers using BlueZ D-Bus signals.
+// Scanner watches for Sidepath peers using BlueZ D-Bus signals.
 type Scanner struct {
 	adapter  *Adapter
 	results  chan ScanResult
@@ -52,7 +52,7 @@ func NewScanner(adapter *Adapter) *Scanner {
 	}
 }
 
-// Results returns a channel that receives discovered BLEEdge devices.
+// Results returns a channel that receives discovered Sidepath devices.
 func (s *Scanner) Results() <-chan ScanResult { return s.results }
 
 // Start begins scanning. It sets a discovery filter for LE and watches
@@ -151,8 +151,8 @@ func (s *Scanner) handleSignal(sig *dbus.Signal) {
 }
 
 func (s *Scanner) handleDeviceProps(path dbus.ObjectPath, props map[string]dbus.Variant) {
-	// Only care about BLEEdge devices
-	if !s.hasBLEEdgeUUID(props) {
+	// Only care about Sidepath devices
+	if !s.hasSidepathUUID(props) {
 		return
 	}
 
@@ -182,7 +182,7 @@ func (s *Scanner) handleDeviceProps(path dbus.ObjectPath, props map[string]dbus.
 	}
 }
 
-// nodeIDFromManufacturerData parses the BLEEdge NodeID from a device's
+// nodeIDFromManufacturerData parses the Sidepath NodeID from a device's
 // ManufacturerData property (BlueZ type a{qv} → map[uint16]variant of []byte).
 func nodeIDFromManufacturerData(props map[string]dbus.Variant) (core.NodeID, bool) {
 	v, ok := props["ManufacturerData"]
@@ -193,7 +193,7 @@ func nodeIDFromManufacturerData(props map[string]dbus.Variant) (core.NodeID, boo
 	if !ok {
 		return core.NodeID{}, false
 	}
-	entry, ok := m[bleedgeCompanyID]
+	entry, ok := m[sidepathCompanyID]
 	if !ok {
 		return core.NodeID{}, false
 	}
@@ -213,7 +213,7 @@ func nodeIDOrUnknown(r ScanResult) string {
 	return "unknown"
 }
 
-func (s *Scanner) hasBLEEdgeUUID(props map[string]dbus.Variant) bool {
+func (s *Scanner) hasSidepathUUID(props map[string]dbus.Variant) bool {
 	v, ok := props["UUIDs"]
 	if !ok {
 		return false
@@ -223,14 +223,14 @@ func (s *Scanner) hasBLEEdgeUUID(props map[string]dbus.Variant) bool {
 		return false
 	}
 	for _, u := range uuids {
-		if strings.EqualFold(u, BLEEdgeServiceUUID) {
+		if strings.EqualFold(u, SidepathServiceUUID) {
 			return true
 		}
 	}
 	return false
 }
 
-// GetExistingDevices returns BLEEdge devices already known to BlueZ.
+// GetExistingDevices returns Sidepath devices already known to BlueZ.
 func (s *Scanner) GetExistingDevices(ctx context.Context) ([]ScanResult, error) {
 	conn := s.adapter.Conn()
 	obj := conn.Object(bluezService, "/")
@@ -249,7 +249,7 @@ func (s *Scanner) GetExistingDevices(ctx context.Context) ([]ScanResult, error) 
 		if !ok {
 			continue
 		}
-		if !s.hasBLEEdgeUUID(props) {
+		if !s.hasSidepathUUID(props) {
 			continue
 		}
 		r := ScanResult{DevicePath: path}

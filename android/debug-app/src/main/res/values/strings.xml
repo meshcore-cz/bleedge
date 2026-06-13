@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BLEEdge</string>
-    <string name="notification_channel_name">BLEEdge Mesh Service</string>
+    <string name="app_name">Sidepath</string>
+    <string name="notification_channel_name">Sidepath Mesh Service</string>
 </resources>

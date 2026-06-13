@@ -8,7 +8,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 const (
@@ -17,10 +17,10 @@ const (
 	gattManagerIF    = "org.bluez.GattManager1"
 	gattDescriptorIF = "org.bluez.GattDescriptor1"
 
-	servicePath   = dbus.ObjectPath("/org/bleedge/service0")
-	charNodeInfo  = dbus.ObjectPath("/org/bleedge/service0/char0")
-	charPacketIn  = dbus.ObjectPath("/org/bleedge/service0/char1")
-	charPacketOut = dbus.ObjectPath("/org/bleedge/service0/char2")
+	servicePath   = dbus.ObjectPath("/org/sidepath/service0")
+	charNodeInfo  = dbus.ObjectPath("/org/sidepath/service0/char0")
+	charPacketIn  = dbus.ObjectPath("/org/sidepath/service0/char1")
+	charPacketOut = dbus.ObjectPath("/org/sidepath/service0/char2")
 
 	// Service and characteristic UUIDs
 	ServiceUUID   = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a001"
@@ -29,7 +29,7 @@ const (
 	PacketOutUUID = "9b7e6a10-7d91-4c19-a3b8-6e2a11f3a004"
 )
 
-// GattServer implements the BLEEdge GATT service over BlueZ D-Bus Application API.
+// GattServer implements the Sidepath GATT service over BlueZ D-Bus Application API.
 type GattServer struct {
 	conn        *dbus.Conn
 	adapter     *Adapter
@@ -98,7 +98,7 @@ func (g *GattServer) Register() error {
 	// Register application with BlueZ GATT manager
 	gattMgr := g.conn.Object(bluezService, g.adapter.AdapterPath())
 	opts := map[string]dbus.Variant{}
-	call := gattMgr.Call(gattManagerIF+".RegisterApplication", 0, dbus.ObjectPath("/org/bleedge"), opts)
+	call := gattMgr.Call(gattManagerIF+".RegisterApplication", 0, dbus.ObjectPath("/org/sidepath"), opts)
 	if call.Err != nil {
 		return fmt.Errorf("RegisterApplication: %w", call.Err)
 	}
@@ -110,7 +110,7 @@ func (g *GattServer) Register() error {
 // Unregister removes the application from BlueZ.
 func (g *GattServer) Unregister() error {
 	gattMgr := g.conn.Object(bluezService, g.adapter.AdapterPath())
-	call := gattMgr.Call(gattManagerIF+".UnregisterApplication", 0, dbus.ObjectPath("/org/bleedge"))
+	call := gattMgr.Call(gattManagerIF+".UnregisterApplication", 0, dbus.ObjectPath("/org/sidepath"))
 	return call.Err
 }
 

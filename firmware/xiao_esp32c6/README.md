@@ -1,6 +1,6 @@
-# BLEEdge relay firmware — Seeed Studio XIAO ESP32-C6
+# Sidepath Protocol relay firmware — Seeed Studio XIAO ESP32-C6
 
-Minimal relay node for the BLEEdge mesh. The ESP32-C6 runs as a **multi-connection
+Minimal relay node for the Sidepath mesh. The ESP32-C6 runs as a **multi-connection
 GATT-server "relay hub"**: phones and other nodes connect to it as GATT clients —
 exactly the way they connect to each other — and it floods packets between all
 connected peers, applying the same routing rules as the rest of the mesh
@@ -13,9 +13,9 @@ with integer keys.
 
 ## What it does
 
-- Advertises the BLEEdge service UUID (primary advert) + `0xBEED` manufacturer data
+- Advertises the Sidepath service UUID (primary advert) + `0xBEED` manufacturer data
   carrying its NodeID (scan response) so any node discovers it on 1M PHY.
-- GATT server with the three BLEEdge characteristics: `NODE_INFO` (read),
+- GATT server with the three Sidepath characteristics: `NODE_INFO` (read),
   `PACKET_IN` (write), `PACKET_OUT` (notify).
 - Reassembles incoming frames, decodes the datagram, and for **flood** datagrams:
   drops duplicates / loops / TTL-exhausted, appends itself to the path, decrements
@@ -29,7 +29,7 @@ with integer keys.
   datagram) is the directly-connected peer — which works even though every connection
   is inbound (the phones connect to the relay, not the other way around).
 - Derives a stable 10-byte NodeID from its persisted Ed25519 public key (`pubkey[:10]`).
-- Provides admin commands over USB serial and encrypted direct BLEEdge Chat
+- Provides admin commands over USB serial and encrypted direct Meshward
   messages for relay diagnostics, admin-key management, and clock setup.
 
 ## Limitations (intentional, for a "basic" relay)
@@ -49,7 +49,7 @@ with integer keys.
 1. Install the **arduino-esp32** core **≥ 3.0.0** (Boards Manager → "esp32 by Espressif").
 2. Install **NimBLE-Arduino ≥ 2.1.0** (Library Manager → "NimBLE-Arduino").
 3. Select board **"XIAO_ESP32C6"**.
-4. Optional: set `BLEEDGE_ADMIN_PUBKEY` to a 32-byte Ed25519 public key hex
+4. Optional: set `SIDEPATH_ADMIN_PUBKEY` to a 32-byte Ed25519 public key hex
    string in your build flags to enable a built-in remote admin.
 5. Open `xiao_esp32c6.ino` (keep `mesh.h` / `mesh.cpp` / `remote_admin.h`
    in the same folder) and Upload.
@@ -61,7 +61,7 @@ with integer keys.
 Admin commands are available in two places:
 
 - USB Serial Monitor at 115200 baud.
-- Encrypted BLEEdge Chat v1 `DIRECT_TEXT` messages addressed to the relay node.
+- Encrypted Meshward v1 `DIRECT_TEXT` messages addressed to the relay node.
   The sender must be a configured admin public key. Remote admin replies are sent
   back as encrypted `DIRECT_TEXT` messages.
 
@@ -94,10 +94,10 @@ arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32C6 -p /dev/ttyACM0 firmware/xia
 ## Trying it
 
 1. Flash the XIAO and power it.
-2. On two Android phones (or a phone + a Mac running `bleedge-macos`), set PHY to
+2. On two Android phones (or a phone + a Mac running `sidepath-macos`), set PHY to
    `1m` and start the service. Place them far enough apart that they don't connect
    directly, but both in range of the XIAO.
-3. Each connects to `BLEEdge` (the relay). Send a broadcast message from one — it
+3. Each connects to `Sidepath` (the relay). Send a broadcast message from one — it
    reaches the other via the relay, and the relay shows up in the Topology tab
    (with `relay` capability and a recent "last announce" time).
 

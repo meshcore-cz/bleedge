@@ -1,16 +1,16 @@
 // Package meshcore implements a minimal, dependency-free bridge that taps a
 // running meshcore-go backend daemon over its Unix-socket IPC and forwards
-// MeshCore over-the-air packets into a BLEEdge mesh.
+// MeshCore over-the-air packets into a Sidepath mesh.
 //
 // Phase 1 is deliberately dumb: it subscribes to the backend's `watch_rf`
 // stream (raw OTA bytes), decodes each complete MeshCore packet, and hands only
-// packets that should propagate to a forward callback. The BLEEdge side wraps
-// each packet opaquely in a v3 MESHCORE_PACKET datagram; BLEEdge routing never
+// packets that should propagate to a forward callback. The Sidepath side wraps
+// each packet opaquely in a v3 MESHCORE_PACKET datagram; Sidepath routing never
 // decodes the inner MeshCore payload.
 //
 // The IPC wire format is meshcore-go's own newline-JSON request/response
 // protocol (see meshcore-go backend/client.go). We re-implement only the tiny
-// slice of it we need so BLEEdge does not have to import the heavy meshcore-go
+// slice of it we need so Sidepath does not have to import the heavy meshcore-go
 // module (which requires Go 1.25 and pulls a backend/sqlite dependency tree).
 package meshcore
 
@@ -116,7 +116,7 @@ type Config struct {
 	Device string
 	// DedupTTL is how long an identical packet (by content hash) is suppressed
 	// after being forwarded. MeshCore re-floods packets repeatedly;
-	// without this the BLEEdge mesh would be spammed. Zero uses 60s.
+	// without this the Sidepath mesh would be spammed. Zero uses 60s.
 	DedupTTL time.Duration
 	// ReconnectDelay is the wait before re-dialing after the stream drops or
 	// the daemon is unavailable. Zero uses 2s.
@@ -130,9 +130,9 @@ type Bridge struct {
 	cfg Config
 
 	mu         sync.Mutex
-	seen       map[[32]byte]time.Time // content hash -> last-forwarded time (MeshCore -> BLEEdge)
-	seenOut    map[string]time.Time   // BLEEdge datagram id hex -> last-bridged time (BLEEdge -> MeshCore)
-	seenRawOut map[[32]byte]time.Time // raw MeshCore packet hash -> last-injected time (BLEEdge -> MeshCore)
+	seen       map[[32]byte]time.Time // content hash -> last-forwarded time (MeshCore -> Sidepath)
+	seenOut    map[string]time.Time   // Sidepath datagram id hex -> last-bridged time (Sidepath -> MeshCore)
+	seenRawOut map[[32]byte]time.Time // raw MeshCore packet hash -> last-injected time (Sidepath -> MeshCore)
 }
 
 // New creates a Bridge from cfg, applying defaults.
@@ -250,7 +250,7 @@ func classify(raw []byte) (meshpkt.Packet, ForwardMode, []byte, string, error) {
 	if err != nil {
 		return meshpkt.Packet{}, 0, nil, "", err
 	}
-	// ADVERTs are broadcast node announcements — always flood them onto BLEEdge so nodes can
+	// ADVERTs are broadcast node announcements — always flood them onto Sidepath so nodes can
 	// discover the advertiser, even when MeshCore sent the advert as a DIRECT packet (which has
 	// no routable target hash and would otherwise be skipped below).
 	if pkt.Type == meshpkt.PayloadAdvert {
@@ -258,7 +258,7 @@ func classify(raw []byte) (meshpkt.Packet, ForwardMode, []byte, string, error) {
 	}
 	// Data-bearing direct messages (TXT_MSG etc.) are addressed by a 1-byte dest hash in their
 	// payload, INDEPENDENT of the MeshCore route mode: a sender with no known path emits a DM as
-	// RouteFlood, but it is still destined for a single node. Resolve BLEEdge candidates by that
+	// RouteFlood, but it is still destined for a single node. Resolve Sidepath candidates by that
 	// dest hash and deliver directly (the caller floods as a fallback when no candidate matches),
 	// rather than blindly flooding every FLOOD-routed DM.
 	if payloadCarriesDestHash(pkt.Type) && len(pkt.Payload) > 0 {
@@ -404,7 +404,7 @@ func (b *Bridge) shouldForwardDigest(digest [32]byte) bool {
 	return true
 }
 
-// shouldForwardPacket decides whether an inbound MeshCore packet should be forwarded into BLEEdge.
+// shouldForwardPacket decides whether an inbound MeshCore packet should be forwarded into Sidepath.
 // Deduplication keys on the route-independent CoreScope-compatible content digest
 // (meshpkt.ContentDigest), so the same logical packet arriving over different routes, paths, or
 // transport encodings is forwarded only once. The packet is already decoded by classify, so it is
@@ -417,9 +417,9 @@ func (b *Bridge) shouldForwardPacket(pkt meshpkt.Packet) bool {
 	return b.shouldForwardDigest(meshpkt.ContentDigest(pkt))
 }
 
-// shouldBridgeOut returns true the first time a given BLEEdge channel datagram (keyed by its id
-// hex) is offered for outbound bridging within DedupTTL. This guarantees each BLEEdge channel
-// message is emitted onto MeshCore at most once, even if it reaches us over multiple BLEEdge paths.
+// shouldBridgeOut returns true the first time a given Sidepath channel datagram (keyed by its id
+// hex) is offered for outbound bridging within DedupTTL. This guarantees each Sidepath channel
+// message is emitted onto MeshCore at most once, even if it reaches us over multiple Sidepath paths.
 func (b *Bridge) shouldBridgeOut(datagramIDHex string) bool {
 	now := time.Now()
 	b.mu.Lock()
@@ -436,9 +436,9 @@ func (b *Bridge) shouldBridgeOut(datagramIDHex string) bool {
 	return true
 }
 
-// BridgeChannelOut emits a BLEEdge channel message onto the real MeshCore network as a GRP_TXT,
-// exactly once per BLEEdge datagram. channelPayload is the bare MeshCore GRP_TXT channel_payload
-// (hash|mac|ciphertext) carried inside the BLEEdge channel datagram — already MeshCore-compatible,
+// BridgeChannelOut emits a Sidepath channel message onto the real MeshCore network as a GRP_TXT,
+// exactly once per Sidepath datagram. channelPayload is the bare MeshCore GRP_TXT channel_payload
+// (hash|mac|ciphertext) carried inside the Sidepath channel datagram — already MeshCore-compatible,
 // so it is wrapped verbatim in a flood OTA packet and injected via send_mesh_packet.
 //
 // Returns bridged=false (with nil error) when this datagram id was already bridged. On success it
@@ -470,8 +470,8 @@ func (b *Bridge) BridgeChannelOut(ctx context.Context, datagramIDHex string, cha
 }
 
 // shouldInjectRaw returns true the first time a given raw MeshCore packet is offered for outbound
-// injection within DedupTTL. A BLEEdge node's outbound MeshCore packet (e.g. a DM ACK) reaches us
-// over multiple BLEEdge paths as distinct datagrams carrying identical inner bytes; this guarantees
+// injection within DedupTTL. A Sidepath node's outbound MeshCore packet (e.g. a DM ACK) reaches us
+// over multiple Sidepath paths as distinct datagrams carrying identical inner bytes; this guarantees
 // we inject it onto the radio at most once.
 //
 // This is INTENTIONALLY a hash of the exact raw OTA wire bytes (sha256.Sum256(rawMeshBytes)), NOT
@@ -495,8 +495,8 @@ func (b *Bridge) shouldInjectRaw(rawMeshBytes []byte) bool {
 	return true
 }
 
-// BridgeRawOut injects an opaque, fully-formed MeshCore OTA packet that originated on the BLEEdge
-// mesh (e.g. an ACK a BLEEdge node built for a received MeshCore DM) onto the real MeshCore radio,
+// BridgeRawOut injects an opaque, fully-formed MeshCore OTA packet that originated on the Sidepath
+// mesh (e.g. an ACK a Sidepath node built for a received MeshCore DM) onto the real MeshCore radio,
 // exactly once per identical packet within DedupTTL. The bytes are passed verbatim to
 // send_mesh_packet; the bridge does not decode or alter them.
 //

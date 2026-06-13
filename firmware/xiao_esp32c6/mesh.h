@@ -1,4 +1,4 @@
-// BLEEdge v3 mesh core for microcontrollers. Pure wire logic, no NimBLE
+// Sidepath v3 mesh core for microcontrollers. Pure wire logic, no NimBLE
 // dependency, so it can be host-tested against the Go implementation.
 #pragma once
 
@@ -31,9 +31,9 @@ enum : uint8_t {
 };
 
 enum : uint16_t {
-  PROTO_BLEEDGE_CONTROL = 0x0000,
+  PROTO_SIDEPATH_CONTROL = 0x0000,
   PROTO_MESHCORE_PACKET = 0x0001,
-  PROTO_BLEEDGE_CHAT    = 0x0100,
+  PROTO_SIDEPATH_CHAT    = 0x0100,
 };
 
 enum : uint16_t { FLAG_ACK_REQUESTED = 0x0001 };
@@ -112,7 +112,7 @@ struct DatagramHeader {
   bool hasNextHop = false;
   const uint8_t* payload = nullptr;
   size_t payloadLen = 0;
-  uint8_t controlKind = 0;  // parsed when protocol == BLEEDGE_CONTROL.
+  uint8_t controlKind = 0;  // parsed when protocol == SIDEPATH_CONTROL.
 };
 
 bool directNeighbor(const DatagramHeader& h, uint8_t out[NODE_ID_LEN]);

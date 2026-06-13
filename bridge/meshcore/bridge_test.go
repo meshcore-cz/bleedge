@@ -138,7 +138,7 @@ func TestClassifyDirectPacketWithoutTargetHash(t *testing.T) {
 
 func TestClassifyDirectAdvertIsFlooded(t *testing.T) {
 	// A DIRECT-routed ADVERT has no routable target hash, but adverts are broadcast node
-	// announcements and must still be flooded onto BLEEdge for discovery.
+	// announcements and must still be flooded onto Sidepath for discovery.
 	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
 		Route:        meshpkt.RouteDirect,
 		Type:         meshpkt.PayloadAdvert,

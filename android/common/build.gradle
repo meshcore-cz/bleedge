@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace 'cz.arnal.bleedge'
+    namespace 'cz.meshcore.sidepath'
     compileSdk 35
 
     defaultConfig {
@@ -23,8 +23,8 @@ android {
 
 dependencies {
     // v3 protocol + chat SDKs (pure-Kotlin, publishable libraries).
-    api project(':bleedge-protocol')
-    api project(':bleedge-chat')
+    api project(':sidepath-protocol')
+    api project(':meshward-chat')
     implementation "androidx.core:core-ktx:1.13.1"
     api "com.upokecenter:cbor:4.5.4"
     api "androidx.datastore:datastore-preferences:1.1.1"
@@ -33,7 +33,7 @@ dependencies {
     // (no JCE provider registration → no conflict with Android's bundled BC).
     api "org.bouncycastle:bcprov-jdk18on:1.78.1"
     // meshpkt MeshCore packet decoder (gomobile AAR; native .so per ABI). Used by the
-    // MeshCore subsystem to decode raw MeshCore packets carried opaquely over the BLEEdge
+    // MeshCore subsystem to decode raw MeshCore packets carried opaquely over the Sidepath
     // mesh. compileOnly here because AGP forbids bundling a local .aar into a library AAR
     // (:common:bundleDebugAar); the *app* modules add it as a real `implementation` dep so
     // its classes + jni libs land in the APK. See chat-app/build.gradle.

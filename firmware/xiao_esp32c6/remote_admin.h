@@ -1,8 +1,8 @@
-// Remote admin commands over BLEEdge Chat v1 DIRECT_TEXT.
+// Remote admin commands over Meshward v1 DIRECT_TEXT.
 //
 // This file intentionally keeps chat/admin code separate from the relay core in
 // xiao_esp32c6.ino. It handles only datagrams addressed to this node with
-// protocol BLEEDGE_CHAT and chat kind DIRECT_TEXT.
+// protocol SIDEPATH_CHAT and chat kind DIRECT_TEXT.
 
 #include <mbedtls/bignum.h>
 #include <mbedtls/gcm.h>
@@ -11,8 +11,8 @@
 #include <mbedtls/version.h>
 
 static const char* ADMIN_PUBKEYS[] = {
-#ifdef BLEEDGE_ADMIN_PUBKEY
-  BLEEDGE_ADMIN_PUBKEY,
+#ifdef SIDEPATH_ADMIN_PUBKEY
+  SIDEPATH_ADMIN_PUBKEY,
 #endif
 };
 
@@ -539,7 +539,7 @@ static bool chatKeyForPeerAdmin(const uint8_t peerEdPub[32], uint8_t key[32]) {
   if (!ed25519PubToX25519Admin(peerEdPub, peerXPub)) return false;
   if (!x25519ScalarMultAdmin(myPriv, peerXPub, secret)) return false;
   std::vector<uint8_t> info;
-  const char prefix[] = "BLEEDGE-CHAT-DIRECT-V1";
+  const char prefix[] = "SIDEPATH-CHAT-DIRECT-V1";
   info.insert(info.end(), prefix, prefix + sizeof(prefix));
   const uint8_t* low = g_pubKey;
   const uint8_t* high = peerEdPub;
@@ -556,14 +556,14 @@ static void directAADAdmin(const uint8_t datagramId[mesh::DATAGRAM_ID_LEN],
                            const uint8_t senderPub[mesh::PUBKEY_LEN],
                            std::vector<uint8_t>& aad) {
   aad.clear();
-  const char prefix[] = "BLEEDGE-CHAT-DIRECT-AAD-V1";
+  const char prefix[] = "SIDEPATH-CHAT-DIRECT-AAD-V1";
   aad.insert(aad.end(), prefix, prefix + sizeof(prefix));
   aad.insert(aad.end(), datagramId, datagramId + mesh::DATAGRAM_ID_LEN);
   aad.insert(aad.end(), source, source + mesh::NODE_ID_LEN);
   aad.insert(aad.end(), dest, dest + mesh::NODE_ID_LEN);
   aad.insert(aad.end(), senderPub, senderPub + mesh::PUBKEY_LEN);
-  aad.push_back((uint8_t)mesh::PROTO_BLEEDGE_CHAT);
-  aad.push_back((uint8_t)(mesh::PROTO_BLEEDGE_CHAT >> 8));
+  aad.push_back((uint8_t)mesh::PROTO_SIDEPATH_CHAT);
+  aad.push_back((uint8_t)(mesh::PROTO_SIDEPATH_CHAT >> 8));
   aad.push_back(1);
   aad.push_back(2);
 }
@@ -667,7 +667,7 @@ static void buildChatDatagramAdmin(const uint8_t id[mesh::DATAGRAM_ID_LEN],
   cborEmitUintAdmin(dg, mesh::KEY_TTL); cborEmitUintAdmin(dg, route.size());
   cborEmitUintAdmin(dg, mesh::KEY_ROUTE); cborEmitRouteAdmin(dg, route);
   cborEmitUintAdmin(dg, mesh::KEY_ROUTE_CURSOR); cborEmitUintAdmin(dg, 0);
-  cborEmitUintAdmin(dg, mesh::KEY_PROTOCOL); cborEmitUintAdmin(dg, mesh::PROTO_BLEEDGE_CHAT);
+  cborEmitUintAdmin(dg, mesh::KEY_PROTOCOL); cborEmitUintAdmin(dg, mesh::PROTO_SIDEPATH_CHAT);
   if (flags) { cborEmitUintAdmin(dg, mesh::KEY_FLAGS); cborEmitUintAdmin(dg, flags); }
   cborEmitUintAdmin(dg, mesh::KEY_PAYLOAD); cborEmitBstrAdmin(dg, payload.data(), payload.size());
 }
@@ -710,14 +710,14 @@ static void sendAckAdmin(uint16_t conn, const uint8_t destNode[mesh::NODE_ID_LEN
   cborEmitUintAdmin(dg, mesh::KEY_TTL); cborEmitUintAdmin(dg, route.size());
   cborEmitUintAdmin(dg, mesh::KEY_ROUTE); cborEmitRouteAdmin(dg, route);
   cborEmitUintAdmin(dg, mesh::KEY_ROUTE_CURSOR); cborEmitUintAdmin(dg, 0);
-  cborEmitUintAdmin(dg, mesh::KEY_PROTOCOL); cborEmitUintAdmin(dg, mesh::PROTO_BLEEDGE_CONTROL);
+  cborEmitUintAdmin(dg, mesh::KEY_PROTOCOL); cborEmitUintAdmin(dg, mesh::PROTO_SIDEPATH_CONTROL);
   cborEmitUintAdmin(dg, mesh::KEY_PAYLOAD); cborEmitBstrAdmin(dg, ctrl.data(), ctrl.size());
   g_dedup.seenOrAdd(id);
   sendAdminDatagramRoute(dg, route, conn);
 }
 
 static bool handleRemoteAdminChat(const std::vector<uint8_t>& dg, const mesh::DatagramHeader& h, uint16_t sender) {
-  if (h.protocol != mesh::PROTO_BLEEDGE_CHAT || !h.hasDestination ||
+  if (h.protocol != mesh::PROTO_SIDEPATH_CHAT || !h.hasDestination ||
       memcmp(h.destination, g_nodeId, mesh::NODE_ID_LEN) != 0 ||
       h.payload == nullptr || h.payloadLen == 0) {
     return false;

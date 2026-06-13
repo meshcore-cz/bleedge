@@ -18,9 +18,9 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "BLEEdge"
-include ':bleedge-protocol'
-include ':bleedge-chat'
+rootProject.name = "Sidepath Protocol"
+include ':sidepath-protocol'
+include ':meshward-chat'
 include ':common'
 // ':debug-app' is parked on the v2 protocol and excluded from the v3 build.
 include ':chat-app'

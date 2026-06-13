@@ -73,9 +73,9 @@ type TransferID [TransferIDBytes]byte
 type PayloadProtocol uint16
 
 const (
-	ProtocolBLEEdgeControl PayloadProtocol = 0x0000
+	ProtocolSidepathControl PayloadProtocol = 0x0000
 	ProtocolMeshCorePacket PayloadProtocol = 0x0001
-	ProtocolBLEEdgeChat    PayloadProtocol = 0x0100
+	ProtocolSidepathChat    PayloadProtocol = 0x0100
 )
 
 type DatagramFlag uint16
@@ -91,7 +91,7 @@ const (
 	ControlAck           ControlKind = 2
 	ControlTraceRequest  ControlKind = 3
 	ControlTraceResponse ControlKind = 4
-	// ControlBridged (ACK_BRIDGED) tells the original sender of a BLEEdge channel message that a
+	// ControlBridged (ACK_BRIDGED) tells the original sender of a Sidepath channel message that a
 	// gateway relayed it onto an external network (e.g. MeshCore as a GRP_TXT). Informational only;
 	// never relied on for routing. §9.2.
 	ControlBridged ControlKind = 5

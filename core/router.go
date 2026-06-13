@@ -91,7 +91,7 @@ func (r *Router) HandleDatagram(dg Datagram, incomingPeer *NodeID) []Action {
 }
 
 func (r *Router) verifyControlIfAnnounce(dg Datagram) *bool {
-	if dg.Protocol != ProtocolBLEEdgeControl {
+	if dg.Protocol != ProtocolSidepathControl {
 		return nil
 	}
 	ctrl, err := DecodeControl(dg.Payload)
@@ -184,7 +184,7 @@ func (r *Router) buildAck(delivered Datagram) Action {
 		Destination: delivered.Source,
 		TTL:         uint8(len(route)),
 		Route:       route,
-		Protocol:    ProtocolBLEEdgeControl,
+		Protocol:    ProtocolSidepathControl,
 		Payload:     payload,
 	}
 	r.MarkOriginated(ack.ID)
@@ -199,7 +199,7 @@ func (r *Router) BuildBridged(dst NodeID, bridgedID DatagramID, meshHash []byte)
 	if err != nil {
 		return Datagram{}, false
 	}
-	return r.NewUnicast(dst, ProtocolBLEEdgeControl, payload, 0, DefaultFloodTTL, false)
+	return r.NewUnicast(dst, ProtocolSidepathControl, payload, 0, DefaultFloodTTL, false)
 }
 
 func (r *Router) BuildAnnounce(caps Capabilities, epoch uint64, seq uint32) (Datagram, error) {
@@ -217,7 +217,7 @@ func (r *Router) BuildAnnounce(caps Capabilities, epoch uint64, seq uint32) (Dat
 		Source:      r.LocalID,
 		Destination: BroadcastNodeID,
 		TTL:         AnnounceTTL,
-		Protocol:    ProtocolBLEEdgeControl,
+		Protocol:    ProtocolSidepathControl,
 		Payload:     payload,
 	}
 	r.MarkOriginated(dg.ID)

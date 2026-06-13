@@ -37,7 +37,7 @@ static size_t cborItemLen(const uint8_t* p, size_t avail) {
   if (avail < 1) return 0;
   uint8_t mt = p[0] >> 5, ai = p[0] & 0x1f;
   if (ai > 27 && ai != 31) return 0;
-  if (ai == 31) return 0;  // indefinite forms are not used by BLEEdge.
+  if (ai == 31) return 0;  // indefinite forms are not used by Sidepath.
   size_t head = 1 + cborArgLen(ai);
   if (head > avail) return 0;
   uint64_t arg = cborArgVal(p, ai);
@@ -248,7 +248,7 @@ static bool readNodeArray(const uint8_t* val, size_t vl, const uint8_t selfId[NO
 }
 
 static void parseControl(DatagramHeader& h) {
-  if (h.protocol != PROTO_BLEEDGE_CONTROL || h.payload == nullptr || h.payloadLen < 1) return;
+  if (h.protocol != PROTO_SIDEPATH_CONTROL || h.payload == nullptr || h.payloadLen < 1) return;
   const uint8_t* p = h.payload;
   size_t len = h.payloadLen;
   if ((p[0] >> 5) != 5) return;
@@ -436,7 +436,7 @@ void announceSignedMessage(const uint8_t pubKey[PUBKEY_LEN], uint64_t epoch, uin
                            const char* name, const char* description, const char* platform,
                            std::vector<uint8_t>& out) {
   out.clear();
-  const char prefix[] = "BLEEDGE-ANNOUNCE-V1";
+  const char prefix[] = "SIDEPATH-ANNOUNCE-V1";
   out.insert(out.end(), prefix, prefix + sizeof(prefix));  // includes trailing NUL.
   out.push_back(ANNOUNCE_VERSION);
   out.insert(out.end(), pubKey, pubKey + PUBKEY_LEN);
@@ -485,7 +485,7 @@ void buildAnnounce(const uint8_t selfId[NODE_ID_LEN], uint16_t caps, uint64_t ep
   emitUint(out, KEY_SOURCE); emitBstr(out, selfId, NODE_ID_LEN);
   emitUint(out, KEY_DEST); emitBstr(out, zero, NODE_ID_LEN);
   emitUint(out, KEY_TTL); emitUint(out, ANNOUNCE_TTL);
-  emitUint(out, KEY_PROTOCOL); emitUint(out, PROTO_BLEEDGE_CONTROL);
+  emitUint(out, KEY_PROTOCOL); emitUint(out, PROTO_SIDEPATH_CONTROL);
   emitUint(out, KEY_PAYLOAD); emitBstr(out, ctrl.data(), ctrl.size());
 }
 

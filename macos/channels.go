@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 // Channel messaging mirrors the Android chat app: the node keeps a registry of
@@ -91,7 +91,7 @@ func (n *Node) SendToChannel(secret []byte, text string) error {
 	if err != nil {
 		return err
 	}
-	dg := n.router.NewBroadcast(core.ProtocolBLEEdgeChat, payload, 4)
+	dg := n.router.NewBroadcast(core.ProtocolSidepathChat, payload, 4)
 	return n.transmit(dg)
 }
 

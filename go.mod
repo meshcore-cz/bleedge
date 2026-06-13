@@ -1,4 +1,4 @@
-module github.com/burningtree/bleedge
+module github.com/meshcore-cz/sidepath-protocol
 
 go 1.25.0
 

@@ -22,7 +22,7 @@ const (
 // [tag:4 LE][auth_code:4 LE][flags:1][route_hashes...].
 //
 // flags & 0x03 selects each route hash width: 0=1B, 1=2B, 2=4B, 3=8B.
-// BLEEdge currently uses 8-byte NodeID route hashes for exact routing.
+// Sidepath currently uses 8-byte NodeID route hashes for exact routing.
 type TracePayload struct {
 	Tag       uint32
 	AuthCode  uint32

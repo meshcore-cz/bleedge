@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace 'cz.arnal.bleedge.chat'
+    namespace 'cz.meshcore.meshward'
     compileSdk 35
 
     defaultConfig {
-        applicationId "cz.arnal.bleedge.chat"
+        applicationId "cz.meshcore.meshward"
         minSdk 26
         targetSdk 35
         versionCode 1

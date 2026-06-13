@@ -158,7 +158,7 @@ func (a AckBody) ToControl() ([]byte, error) {
 }
 
 // BridgedBody (ACK_BRIDGED, §9.2) is returned to the sender of a channel message after a gateway
-// relayed it onto an external network. BridgedID is the bridged BLEEdge datagram id, BridgeID the
+// relayed it onto an external network. BridgedID is the bridged Sidepath datagram id, BridgeID the
 // gateway's NodeID, and MeshHash an optional short hash of the emitted external packet (for dedup
 // / correlation). Purely informational; never used for routing.
 type BridgedBody struct {

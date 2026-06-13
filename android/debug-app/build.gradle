@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace 'cz.arnal.bleedge.debug'
+    namespace 'cz.meshcore.sidepath.debug'
     compileSdk 35
 
     defaultConfig {
-        applicationId "cz.arnal.bleedge.debug"
+        applicationId "cz.meshcore.sidepath.debug"
         minSdk 26
         targetSdk 35
         versionCode 1

@@ -82,7 +82,7 @@ func appendString16(buf []byte, s string) []byte {
 
 func AnnounceSignedMessage(pub []byte, epoch uint64, seq uint32, timestamp int64, caps Capabilities, neighbors []NodeID, name, desc, platform string) []byte {
 	buf := make([]byte, 0, 128+len(neighbors)*NodeIDBytes+len(name)+len(desc)+len(platform))
-	buf = append(buf, asciiNul("BLEEDGE-ANNOUNCE-V1")...)
+	buf = append(buf, asciiNul("SIDEPATH-ANNOUNCE-V1")...)
 	buf = append(buf, AnnounceVersion)
 	buf = append(buf, pub...)
 	buf = appendLE64(buf, epoch)

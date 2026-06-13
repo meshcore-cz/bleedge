@@ -3,7 +3,7 @@
 package macos
 
 import (
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 	"github.com/go-ble/ble"
 )
 

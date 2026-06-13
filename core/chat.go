@@ -106,7 +106,7 @@ func OpenPublicText(payload []byte, ctx ChatContext) (PublicText, bool) {
 func publicTextSignedBytes(ctx ChatContext, senderPub []byte, sentAt int64, text string) []byte {
 	t := []byte(text)
 	out := bytes.NewBuffer(nil)
-	out.Write(asciiNul("BLEEDGE-CHAT-PUBLIC-TEXT-V1"))
+	out.Write(asciiNul("SIDEPATH-CHAT-PUBLIC-TEXT-V1"))
 	out.Write(ctx.DatagramID[:])
 	out.Write(ctx.Source[:])
 	out.Write(ctx.Destination[:])
@@ -151,7 +151,7 @@ func OpenTyping(payload []byte, ctx ChatContext) (int64, []byte, bool) {
 
 func typingSignedBytes(ctx ChatContext, senderPub []byte, sentAt int64) []byte {
 	out := bytes.NewBuffer(nil)
-	out.Write(asciiNul("BLEEDGE-CHAT-TYPING-V1"))
+	out.Write(asciiNul("SIDEPATH-CHAT-TYPING-V1"))
 	out.Write(ctx.DatagramID[:])
 	out.Write(ctx.Source[:])
 	out.Write(ctx.Destination[:])
@@ -257,12 +257,12 @@ func DirectSenderPublicKey(payload []byte) []byte {
 
 func directAAD(ctx ChatContext, senderPub []byte) []byte {
 	out := bytes.NewBuffer(nil)
-	out.Write(asciiNul("BLEEDGE-CHAT-DIRECT-AAD-V1"))
+	out.Write(asciiNul("SIDEPATH-CHAT-DIRECT-AAD-V1"))
 	out.Write(ctx.DatagramID[:])
 	out.Write(ctx.Source[:])
 	out.Write(ctx.Destination[:])
 	out.Write(senderPub)
-	out.Write(appendLE16(nil, uint16(ProtocolBLEEdgeChat)))
+	out.Write(appendLE16(nil, uint16(ProtocolSidepathChat)))
 	out.WriteByte(ChatVersion)
 	out.WriteByte(byte(ChatDirectText))
 	return out.Bytes()
@@ -291,7 +291,7 @@ func pairwiseKey(mySeed, myPub, peerPub []byte) ([]byte, error) {
 		low, high = high, low
 	}
 	info := bytes.NewBuffer(nil)
-	info.Write(asciiNul("BLEEDGE-CHAT-DIRECT-V1"))
+	info.Write(asciiNul("SIDEPATH-CHAT-DIRECT-V1"))
 	info.Write(low)
 	info.Write(high)
 	return hkdfSHA256(secret, nil, info.Bytes(), 32), nil

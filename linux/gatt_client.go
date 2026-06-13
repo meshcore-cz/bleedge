@@ -9,10 +9,10 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
-// GattClient connects to a remote BLEEdge peer and interacts with its GATT service.
+// GattClient connects to a remote Sidepath peer and interacts with its GATT service.
 type GattClient struct {
 	conn       *dbus.Conn
 	adapter    *Adapter
@@ -65,7 +65,7 @@ func (c *GattClient) Connect(ctx context.Context) error {
 		return err
 	}
 
-	// Discover BLEEdge characteristics
+	// Discover Sidepath characteristics
 	if err := c.discoverChars(ctx); err != nil {
 		return fmt.Errorf("discover chars: %w", err)
 	}
@@ -137,7 +137,7 @@ func (c *GattClient) waitServicesResolved(ctx context.Context, dev dbus.BusObjec
 	return fmt.Errorf("timeout waiting for ServicesResolved")
 }
 
-// discoverChars finds the BLEEdge characteristics under the connected device.
+// discoverChars finds the Sidepath characteristics under the connected device.
 func (c *GattClient) discoverChars(ctx context.Context) error {
 	obj := c.conn.Object(bluezService, "/")
 	var managed map[dbus.ObjectPath]map[string]map[string]dbus.Variant
@@ -170,7 +170,7 @@ func (c *GattClient) discoverChars(ctx context.Context) error {
 	}
 
 	if c.charPacketIn == "" {
-		return fmt.Errorf("BLEEdge PACKET_IN characteristic not found under %s", c.devicePath)
+		return fmt.Errorf("Sidepath PACKET_IN characteristic not found under %s", c.devicePath)
 	}
 	log.Printf("[gatt-client] discovered chars: node_info=%s packet_in=%s packet_out=%s",
 		c.charNodeInfo, c.charPacketIn, c.charPacketOut)

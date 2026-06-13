@@ -1,19 +1,19 @@
 Here is `CHAT_PROTOCOL.md` as plain text:
 
-# BLEEdge Chat Protocol Specification
+# Meshward Protocol Specification
 
 **Chat protocol version: 1**
-**BLEEdge payload protocol ID: `0x0100` (`BLEEDGE_CHAT`)**
+**Sidepath payload protocol ID: `0x0100` (`SIDEPATH_CHAT`)**
 
-> BLEEdge Chat is a small native messenger protocol carried inside BLEEdge
+> Meshward is a small native messenger protocol carried inside Sidepath
 > datagrams. It is an application protocol, not part of the routing engine.
 > Relays route its payload as opaque bytes.
 
-This document specifies the first interoperable BLEEdge Chat payload format. It
+This document specifies the first interoperable Meshward payload format. It
 covers public text messages, encrypted direct messages, ephemeral typing
 notifications, encrypted group channels, and emoji reactions.
 
-Channel messages are native BLEEdge Chat messages. Their encrypted payload layout
+Channel messages are native Meshward messages. Their encrypted payload layout
 intentionally mirrors MeshCore `GRP_TXT`, allowing implementations to reuse the
 same channel crypto and allowing gateways to translate channel messages without
 inventing a second group-message format. Tunneling a complete MeshCore packet
@@ -26,8 +26,8 @@ remains separately available through `MESHCORE_PACKET`, as defined in
 
 ```text
 BLE GATT frame
-└── BLEEdge datagram
-    └── BLEEDGE_CHAT payload
+└── Sidepath datagram
+    └── SIDEPATH_CHAT payload
         ├── PUBLIC_TEXT
         ├── DIRECT_TEXT
         ├── TYPING
@@ -36,19 +36,19 @@ BLE GATT frame
         └── CHANNEL_REACTION
 ```
 
-A BLEEdge Chat message is carried inside a BLEEdge datagram with:
+A Meshward message is carried inside a Sidepath datagram with:
 
 ```text
-protocol = BLEEDGE_CHAT   # 0x0100
+protocol = SIDEPATH_CHAT   # 0x0100
 payload  = encoded chat message
 ```
 
-The outer BLEEdge datagram provides:
+The outer Sidepath datagram provides:
 
 * sender and destination NodeIDs;
 * routing and TTL;
 * end-to-end datagram ID;
-* optional BLEEdge delivery acknowledgement; and
+* optional Sidepath delivery acknowledgement; and
 * fragmentation through the hop-local GATT frame layer.
 
 The chat protocol MUST NOT copy routing fields into its own payload.
@@ -70,15 +70,15 @@ Message kinds:
 
 | Value | Name           | Purpose                                                       |
 | ----: | -------------- | ------------------------------------------------------------- |
-|     1 | `PUBLIC_TEXT`      | Signed plaintext message broadcast within the BLEEdge scope   |
-|     2 | `DIRECT_TEXT`      | Authenticated encrypted message sent to one BLEEdge node      |
-|     3 | `TYPING`           | Signed ephemeral typing notification sent to one BLEEdge node |
+|     1 | `PUBLIC_TEXT`      | Signed plaintext message broadcast within the Sidepath scope   |
+|     2 | `DIRECT_TEXT`      | Authenticated encrypted message sent to one Sidepath node      |
+|     3 | `TYPING`           | Signed ephemeral typing notification sent to one Sidepath node |
 |     4 | `CHANNEL_TEXT`     | MeshCore-compatible encrypted group-channel message           |
 |     5 | `DIRECT_REACTION`  | Encrypted emoji reaction to a direct message (§8.1)           |
 |     6 | `CHANNEL_REACTION` | Channel-secret emoji reaction to a channel message (§8.2)     |
 
 Unknown message kinds MUST be ignored after local delivery. Relays MUST continue
-to forward unknown chat payloads according to the outer BLEEdge routing rules.
+to forward unknown chat payloads according to the outer Sidepath routing rules.
 
 ---
 
@@ -86,7 +86,7 @@ to forward unknown chat payloads according to the outer BLEEdge routing rules.
 
 ### 3.1 Sender identity
 
-The sender identity is the Ed25519 public key associated with the outer BLEEdge
+The sender identity is the Ed25519 public key associated with the outer Sidepath
 datagram `source` NodeID.
 
 Whenever a chat body carries `sender_public_key`, the receiver MUST require:
@@ -103,13 +103,13 @@ Relays do not parse or validate chat bodies.
 Chat payloads other than `CHANNEL_TEXT` MUST NOT contain sender display names,
 descriptions, or platform strings.
 
-A UI SHOULD obtain the sender name from the most recent verified BLEEdge
+A UI SHOULD obtain the sender name from the most recent verified Sidepath
 `ANNOUNCE`. If no verified announce is available, it SHOULD display the
 sender's deterministic fallback name or NodeID.
 
 `CHANNEL_TEXT` is the deliberate exception: its encrypted plaintext contains a
 sender label because this mirrors the MeshCore `GRP_TXT` layout. That embedded
-label is a channel-level display hint, not a cryptographic BLEEdge identity.
+label is a channel-level display hint, not a cryptographic Sidepath identity.
 
 ### 3.3 Timestamps
 
@@ -117,7 +117,7 @@ label is a channel-level display hint, not a cryptographic BLEEdge identity.
 reliable clock MUST use `0`.
 
 Timestamp values MUST NOT be used as the sole replay-protection mechanism. The
-outer BLEEdge datagram `id` and deduplication cache provide short-term duplicate
+outer Sidepath datagram `id` and deduplication cache provide short-term duplicate
 suppression.
 
 ### 3.4 Text limits
@@ -135,10 +135,10 @@ exceeds this limit.
 
 ## 4. Signed public text messages
 
-A `PUBLIC_TEXT` message is readable by every receiving node in the BLEEdge scope.
+A `PUBLIC_TEXT` message is readable by every receiving node in the Sidepath scope.
 It is signed but not encrypted.
 
-### 4.1 Outer BLEEdge datagram
+### 4.1 Outer Sidepath datagram
 
 A public text message SHOULD use:
 
@@ -146,12 +146,12 @@ A public text message SHOULD use:
 source      = sender NodeID
 destination = broadcast
 route       = omitted
-protocol    = BLEEDGE_CHAT
+protocol    = SIDEPATH_CHAT
 flags       = 0
 kind        = PUBLIC_TEXT
 ```
 
-The sender chooses an appropriate outer BLEEdge TTL for the intended local
+The sender chooses an appropriate outer Sidepath TTL for the intended local
 scope.
 
 ### 4.2 Body
@@ -168,7 +168,7 @@ scope.
 The sender signs the following exact byte sequence:
 
 ```text
-ascii("BLEEDGE-CHAT-PUBLIC-TEXT-V1\0")
+ascii("SIDEPATH-CHAT-PUBLIC-TEXT-V1\0")
 datagram_id            [16]
 source_node_id         [10]
 destination_node_id    [10]
@@ -201,17 +201,17 @@ Any failure causes the locally delivered chat message to be dropped.
 
 ## 5. Encrypted direct text messages
 
-A `DIRECT_TEXT` message is sent to exactly one BLEEdge node. The text is
+A `DIRECT_TEXT` message is sent to exactly one Sidepath node. The text is
 encrypted and authenticated end to end between the sender and recipient.
 
-### 5.1 Outer BLEEdge datagram
+### 5.1 Outer Sidepath datagram
 
 A direct text message SHOULD use:
 
 ```text
 source      = sender NodeID
 destination = recipient NodeID
-protocol    = BLEEDGE_CHAT
+protocol    = SIDEPATH_CHAT
 flags       = ACK_REQUESTED
 kind        = DIRECT_TEXT
 ```
@@ -221,8 +221,8 @@ Routing mode is selected according to `PROTOCOL.md`:
 * use a source route when a route is known; or
 * use flood routing when direct-message fallback flooding is enabled.
 
-`ACK_REQUESTED` is recommended for direct text messages. The resulting BLEEdge
-ACK confirms local BLEEdge delivery only. It is not a read receipt.
+`ACK_REQUESTED` is recommended for direct text messages. The resulting Sidepath
+ACK confirms local Sidepath delivery only. It is not a read receipt.
 
 ### 5.2 Encrypted body
 
@@ -243,7 +243,7 @@ The encrypted plaintext is a CBOR map:
 
 ### 5.4 Ed25519 to X25519 conversion
 
-Each node uses its BLEEdge Ed25519 identity for chat key agreement by converting
+Each node uses its Sidepath Ed25519 identity for chat key agreement by converting
 it to X25519 using the libsodium-compatible conversion semantics:
 
 ```text
@@ -267,7 +267,7 @@ Derive the AES key using HKDF-SHA256:
 ```text
 ikm  = shared_secret
 salt = empty
-info = ascii("BLEEDGE-CHAT-DIRECT-V1\0") || pub_low || pub_high
+info = ascii("SIDEPATH-CHAT-DIRECT-V1\0") || pub_low || pub_high
 key  = HKDF-SHA256(ikm, salt, info, 32)
 ```
 
@@ -284,7 +284,7 @@ The AES-256-GCM additional authenticated data is the following exact byte
 sequence:
 
 ```text
-ascii("BLEEDGE-CHAT-DIRECT-AAD-V1\0")
+ascii("SIDEPATH-CHAT-DIRECT-AAD-V1\0")
 datagram_id            [16]
 source_node_id         [10]
 destination_node_id    [10]
@@ -334,18 +334,18 @@ Any failure causes the locally delivered chat message to be dropped.
 A `TYPING` message is a small ephemeral hint that a peer is actively composing a
 direct message.
 
-Typing notifications are signed but not encrypted. The outer BLEEdge envelope
+Typing notifications are signed but not encrypted. The outer Sidepath envelope
 already exposes the communicating NodeIDs, so plaintext typing notifications do
 not reveal additional routing relationships.
 
-### 6.1 Outer BLEEdge datagram
+### 6.1 Outer Sidepath datagram
 
 A typing notification MUST use:
 
 ```text
 source      = sender NodeID
 destination = recipient NodeID
-protocol    = BLEEDGE_CHAT
+protocol    = SIDEPATH_CHAT
 flags       = 0
 kind        = TYPING
 ```
@@ -365,7 +365,7 @@ A typing notification MUST NOT request an ACK.
 The sender signs the following exact byte sequence:
 
 ```text
-ascii("BLEEDGE-CHAT-TYPING-V1\0")
+ascii("SIDEPATH-CHAT-TYPING-V1\0")
 datagram_id            [16]
 source_node_id         [10]
 destination_node_id    [10]
@@ -395,10 +395,10 @@ identified by a 16-byte pre-shared secret. Every node that knows the secret can
 read and originate messages for that channel.
 
 The channel payload format intentionally mirrors the MeshCore `GRP_TXT` payload.
-This is a native BLEEdge Chat message type, not a complete encapsulated MeshCore
+This is a native Meshward message type, not a complete encapsulated MeshCore
 packet.
 
-### 7.1 Outer BLEEdge datagram
+### 7.1 Outer Sidepath datagram
 
 A channel message MUST use:
 
@@ -406,13 +406,13 @@ A channel message MUST use:
 source      = sender NodeID
 destination = broadcast
 route       = omitted
-protocol    = BLEEDGE_CHAT
+protocol    = SIDEPATH_CHAT
 flags       = 0
 kind        = CHANNEL_TEXT
 ```
 
 A channel message MUST NOT request an ACK. It is flood-routed according to the
-outer BLEEdge TTL.
+outer Sidepath TTL.
 
 ### 7.2 Body
 
@@ -504,23 +504,23 @@ A valid channel MAC proves knowledge of the shared channel secret. It does not
 prove which individual channel member originated a message.
 
 The sender label embedded in `message_utf8` is therefore a claimed display label.
-A channel member can impersonate another label. The outer BLEEdge `source`
+A channel member can impersonate another label. The outer Sidepath `source`
 NodeID MAY be displayed as transport metadata, but it MUST NOT be interpreted as
 a cryptographic author signature for the channel message.
 
 ### 7.7 MeshCore gateway mapping
 
 Because `channel_payload` matches the MeshCore `GRP_TXT` payload, a gateway can
-translate between native BLEEdge Chat channels and MeshCore group messages:
+translate between native Meshward channels and MeshCore group messages:
 
 ```text
-BLEEDGE_CHAT / CHANNEL_TEXT body.channel_payload
+SIDEPATH_CHAT / CHANNEL_TEXT body.channel_payload
         ↕
 MeshCore GRP_TXT payload
 ```
 
 A gateway targeting a MeshCore radio MUST enforce the packet-size limits of its
-target MeshCore implementation. BLEEdge fragmentation does not enlarge the
+target MeshCore implementation. Sidepath fragmentation does not enlarge the
 maximum packet size accepted by a MeshCore radio.
 
 Complete opaque MeshCore packet tunneling remains separate:
@@ -537,7 +537,7 @@ payload  = complete encoded MeshCore packet
 A reaction adds or removes one emoji on a previously delivered message. A reaction
 references its target by the target message's **application message id**
 (`target_ref`, a UTF-8 string). In this implementation that id is the lowercase
-hex of the target's BLEEdge datagram id for native messages; bridged
+hex of the target's Sidepath datagram id for native messages; bridged
 MeshCore-origin channel messages use their deterministic content id. Every node
 that has the target derives the same id, so reactions converge.
 
@@ -548,7 +548,7 @@ failure, or raise a notification for it.
 Reaction state per `(target_ref, author)` is **last-writer-wins**: a node has at
 most one reaction emoji per target. Re-sending the same emoji with `remove = true`
 clears it; sending a different emoji replaces it. The author identity is the outer
-BLEEdge `source` NodeID. As with channel text (§7.6), a channel reaction's author
+Sidepath `source` NodeID. As with channel text (§7.6), a channel reaction's author
 is transport metadata, not an individual cryptographic signature.
 
 ```text
@@ -564,7 +564,7 @@ A `DIRECT_REACTION` reacts to a one-to-one `DIRECT_TEXT`. It reuses the
 unchanged; only the AAD label and message kind differ, so a `DIRECT_TEXT`
 ciphertext can never be replayed as a reaction.
 
-Outer datagram: `protocol = BLEEDGE_CHAT`, `kind = DIRECT_REACTION`,
+Outer datagram: `protocol = SIDEPATH_CHAT`, `kind = DIRECT_REACTION`,
 `destination = recipient NodeID`. It SHOULD NOT request an ACK and is not
 retried.
 
@@ -586,7 +586,7 @@ Plaintext CBOR map:
 |   4 | `remove`     | bool  | yes      | `true` clears, `false` sets      |
 
 The additional authenticated data is the §5.7 layout with the label
-`ascii("BLEEDGE-CHAT-REACTION-AAD-V1\0")` and `kind = DIRECT_REACTION (= 5)`.
+`ascii("SIDEPATH-CHAT-REACTION-AAD-V1\0")` and `kind = DIRECT_REACTION (= 5)`.
 
 ### 8.2 `CHANNEL_REACTION`
 
@@ -594,10 +594,10 @@ A `CHANNEL_REACTION` reacts to a `CHANNEL_TEXT`. It is broadcast and
 membership-authenticated with the channel secret using the **same**
 `channel_hash || mac || AES-128-ECB` envelope as §7.4, but its encrypted
 plaintext is a native length-prefixed CBOR map, **not** MeshCore `GRP_TXT` text.
-It is therefore a BLEEdge-native extension that gateways do **not** translate to
+It is therefore a Sidepath-native extension that gateways do **not** translate to
 MeshCore (§7.7 maps `CHANNEL_TEXT` only).
 
-Outer datagram: `protocol = BLEEDGE_CHAT`, `kind = CHANNEL_REACTION`,
+Outer datagram: `protocol = SIDEPATH_CHAT`, `kind = CHANNEL_REACTION`,
 `destination = broadcast`, no ACK.
 
 Body:
@@ -639,8 +639,8 @@ many CBOR bytes.
 | `DIRECT_REACTION`  | one NodeID        | AES-256-GCM | AEAD              | no              |
 | `CHANNEL_REACTION` | broadcast         | AES-128-ECB | shared-secret MAC | no              |
 
-A BLEEdge ACK confirms that the outer direct-message datagram reached the
-recipient's BLEEdge node. It does not confirm:
+A Sidepath ACK confirms that the outer direct-message datagram reached the
+recipient's Sidepath node. It does not confirm:
 
 * that the recipient read the message;
 * that a UI displayed the message; or
@@ -654,7 +654,7 @@ Read receipts are not part of chat protocol version 1.
 
 ### 10.1 Public messages
 
-`PUBLIC_TEXT` is signed but readable by every node within the reachable BLEEdge
+`PUBLIC_TEXT` is signed but readable by every node within the reachable Sidepath
 scope.
 
 ### 10.2 Direct messages
@@ -667,7 +667,7 @@ node's long-term identity seed may permit decryption of previously captured
 direct messages involving that node.
 
 A later chat protocol version may introduce ephemeral keys or a ratcheting
-session protocol without changing the BLEEdge routing engine.
+session protocol without changing the Sidepath routing engine.
 
 ### 10.3 Channel messages
 
@@ -689,14 +689,14 @@ treated as authenticated acknowledgements.
 
 ### 10.5 Metadata exposure
 
-BLEEdge routing metadata is visible to relays, including source NodeID,
+Sidepath routing metadata is visible to relays, including source NodeID,
 destination NodeID, route, TTL, and path. Direct-message text remains encrypted,
-but BLEEdge Chat v1 does not hide the communication graph.
+but Meshward v1 does not hide the communication graph.
 
 ### 10.6 Commands and automation
 
 Remote device commands, bots, and automation messages are outside the scope of
-BLEEdge Chat v1. They SHOULD use a separate application payload protocol rather
+Meshward v1. They SHOULD use a separate application payload protocol rather
 than overloading text-message semantics.
 
 ---
@@ -724,9 +724,9 @@ than overloading text-message semantics.
 
 ## 12. Conformance checklist
 
-A conforming BLEEdge Chat v1 implementation MUST:
+A conforming Meshward v1 implementation MUST:
 
-* [ ] carry chat payloads using BLEEdge payload protocol ID `0x0100`;
+* [ ] carry chat payloads using Sidepath payload protocol ID `0x0100`;
 * [ ] CBOR-encode the chat envelope using integer keys `1`–`3`;
 * [ ] treat sender display metadata as signed `ANNOUNCE` state rather than chat payload data;
 * [ ] sign and verify `PUBLIC_TEXT` using the exact fixed byte layout;
@@ -737,7 +737,7 @@ A conforming BLEEdge Chat v1 implementation MUST:
 * [ ] validate the sender-public-key-to-NodeID binding before displaying a message;
 * [ ] recommend `ACK_REQUESTED` only for `DIRECT_TEXT`;
 * [ ] sign and verify ephemeral `TYPING` hints and never request ACKs for them;
-* [ ] implement `CHANNEL_TEXT` as a broadcast BLEEdge Chat subtype;
+* [ ] implement `CHANNEL_TEXT` as a broadcast Meshward subtype;
 * [ ] encode `CHANNEL_TEXT.body.channel_payload` using the exact MeshCore-compatible `GRP_TXT` layout;
 * [ ] derive channel secrets and validate channel MACs exactly as specified;
 * [ ] treat channel sender labels as claims rather than individual cryptographic signatures;

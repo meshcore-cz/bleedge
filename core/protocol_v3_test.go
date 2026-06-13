@@ -31,7 +31,7 @@ func TestDatagramEncodeDecodeRoundTrip(t *testing.T) {
 		Destination: dst,
 		TTL:         2,
 		Route:       []NodeID{dst},
-		Protocol:    ProtocolBLEEdgeChat,
+		Protocol:    ProtocolSidepathChat,
 		Flags:       uint16(FlagAckRequested),
 		Payload:     []byte("hello"),
 	}
@@ -46,7 +46,7 @@ func TestDatagramEncodeDecodeRoundTrip(t *testing.T) {
 	if got.Version != DatagramVersion || got.ID != dg.ID || got.Source != src || got.Destination != dst || got.TTL != 2 {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
-	if got.Protocol != ProtocolBLEEdgeChat || !got.AckRequested() || !bytes.Equal(got.Payload, dg.Payload) {
+	if got.Protocol != ProtocolSidepathChat || !got.AckRequested() || !bytes.Equal(got.Payload, dg.Payload) {
 		t.Fatalf("payload/protocol mismatch: %+v", got)
 	}
 }
@@ -89,7 +89,7 @@ func TestSignedAnnounceUpdatesTopologyAndRejectsTamper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dg := Datagram{Version: DatagramVersion, ID: NewDatagramID(), Source: bob.NodeID(), Destination: BroadcastNodeID, TTL: AnnounceTTL, Protocol: ProtocolBLEEdgeControl, Payload: payload}
+	dg := Datagram{Version: DatagramVersion, ID: NewDatagramID(), Source: bob.NodeID(), Destination: BroadcastNodeID, TTL: AnnounceTTL, Protocol: ProtocolSidepathControl, Payload: payload}
 	acts := r.HandleDatagram(dg, nil)
 	if len(acts) == 0 || acts[0].Type != ActionDeliverLocal {
 		t.Fatalf("expected local delivery/relay actions, got %+v", acts)
@@ -149,7 +149,7 @@ func TestRouterBuildsAckOnlyWhenRequested(t *testing.T) {
 		Destination: bob.NodeID(),
 		TTL:         1,
 		Route:       []NodeID{bob.NodeID()},
-		Protocol:    ProtocolBLEEdgeChat,
+		Protocol:    ProtocolSidepathChat,
 		Flags:       uint16(FlagAckRequested),
 		Payload:     []byte("x"),
 	}
@@ -158,7 +158,7 @@ func TestRouterBuildsAckOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("actions = %+v", acts)
 	}
 	ack := acts[1].Datagram
-	if ack.Protocol != ProtocolBLEEdgeControl || ack.Destination != alice.NodeID() || len(ack.Route) != 1 || ack.Route[0] != alice.NodeID() {
+	if ack.Protocol != ProtocolSidepathControl || ack.Destination != alice.NodeID() || len(ack.Route) != 1 || ack.Route[0] != alice.NodeID() {
 		t.Fatalf("bad ack: %+v", ack)
 	}
 }

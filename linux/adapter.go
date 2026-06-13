@@ -1,4 +1,4 @@
-// Package linux provides BlueZ D-Bus bindings for BLEEdge on Linux.
+// Package linux provides BlueZ D-Bus bindings for Sidepath on Linux.
 package linux
 
 import (

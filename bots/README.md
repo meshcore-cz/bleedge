@@ -1,13 +1,13 @@
-# BLEEdge bots
+# Sidepath Protocol bots
 
-Turn a macOS BLEEdge node into a bot driven by a [Bun](https://bun.sh) JS/TS script.
+Turn a macOS Sidepath node into a bot driven by a [Bun](https://bun.sh) JS/TS script.
 The Go node handles BLE + the mesh + chat encryption; your script just reacts to
 messages and decides what to send back.
 
 ```
                  newline-delimited JSON (stdin/stdout)
   ┌───────────────┐   events  ───────────►   ┌──────────────┐
-  │ bleedge-macos │                           │  bun <script> │
+  │ sidepath-macos │                           │  bun <script> │
   │   (Go node)   │   ◄───────  commands      │  (your bot)   │
   └───────────────┘                           └──────────────┘
 ```
@@ -16,13 +16,13 @@ messages and decides what to send back.
 
 ```sh
 # build the node (macOS)
-make build-macos        # or: go build -o bin/bleedge-macos ./cmd/bleedge-macos
+make build-macos        # or: go build -o bin/sidepath-macos ./cmd/sidepath-macos
 
 # run it as a bot
-./bin/bleedge-macos --bot bots/time-bot.ts
+./bin/sidepath-macos --bot bots/time-bot.ts
 # custom bun path: --bun /opt/homebrew/bin/bun
 # listen on one or more channels (default: Public)
-./bin/bleedge-macos --bot bots/echo-bot.ts --channels "Public,dev"
+./bin/sidepath-macos --bot bots/echo-bot.ts --channels "Public,dev"
 ```
 
 The node runs headless and forwards every chat message to the script. By default

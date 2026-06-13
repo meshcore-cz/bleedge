@@ -1,6 +1,6 @@
 //go:build darwin
 
-// Package macos implements a BLEEdge node for macOS using CoreBluetooth via go-ble.
+// Package macos implements a Sidepath node for macOS using CoreBluetooth via go-ble.
 // CoreBluetooth does not expose LE Coded PHY control, so this node always
 // operates in 1m mode and is NOT valid for the Long Range demonstration.
 // It is useful for development and smoke-testing the routing engine over regular BLE.
@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/darwin"
@@ -39,7 +39,7 @@ const (
 	notifyLogAfterRetries = 3
 )
 
-// Node is a macOS BLEEdge node.
+// Node is a macOS Sidepath node.
 type Node struct {
 	nodeID        core.NodeID
 	identity      *core.Identity
@@ -180,15 +180,15 @@ func (n *Node) Run(ctx context.Context) error {
 	advCtx, advCancel := context.WithCancel(ctx)
 	defer advCancel()
 	go func() {
-		n.logf("advertising BLEEdge service")
-		err := ble.AdvertiseNameAndServices(advCtx, "BLEEdge", serviceUUID)
+		n.logf("advertising Sidepath service")
+		err := ble.AdvertiseNameAndServices(advCtx, "Sidepath", serviceUUID)
 		if err != nil && !isCtxErr(err) {
 			n.logf("advertiser stopped: %v", err)
 		}
 	}()
 
-	// Scanner — finds BLEEdge peers and connects
-	n.logf("scanning for BLEEdge peers")
+	// Scanner — finds Sidepath peers and connects
+	n.logf("scanning for Sidepath peers")
 	err = ble.Scan(ctx, false, n.onAdvertisement, n.scanFilter)
 	if isCtxErr(err) {
 		return nil
@@ -196,7 +196,7 @@ func (n *Node) Run(ctx context.Context) error {
 	return err
 }
 
-// buildGATTService constructs the BLEEdge GATT service with all three characteristics.
+// buildGATTService constructs the Sidepath GATT service with all three characteristics.
 func (n *Node) buildGATTService() *ble.Service {
 	svc := ble.NewService(serviceUUID)
 
@@ -242,7 +242,7 @@ func (n *Node) buildGATTService() *ble.Service {
 	return svc
 }
 
-// scanFilter accepts only advertisements containing the BLEEdge service UUID.
+// scanFilter accepts only advertisements containing the Sidepath service UUID.
 func (n *Node) scanFilter(adv ble.Advertisement) bool {
 	for _, u := range adv.Services() {
 		if u.Equal(serviceUUID) {
@@ -288,7 +288,7 @@ func (n *Node) connectPeer(addr string, adv ble.Advertisement) {
 
 	svc := p.Find(ble.NewService(serviceUUID))
 	if svc == nil {
-		n.logf("peer %s has no BLEEdge service", addr)
+		n.logf("peer %s has no Sidepath service", addr)
 		cln.CancelConnection()
 		return
 	}
@@ -568,7 +568,7 @@ func (n *Node) executeActions(actions []core.Action) {
 }
 
 func (n *Node) deliverLocal(dg core.Datagram) {
-	if dg.Protocol == core.ProtocolBLEEdgeControl {
+	if dg.Protocol == core.ProtocolSidepathControl {
 		ctrl, err := core.DecodeControl(dg.Payload)
 		if err == nil {
 			switch ctrl.Kind {
@@ -601,7 +601,7 @@ func (n *Node) returnTrace(req core.Datagram, body []byte) error {
 		return err
 	}
 	route := reverseTraceRoute(req.Path, req.Source)
-	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: req.Source, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolBLEEdgeControl, Payload: payload}
+	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: req.Source, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolSidepathControl, Payload: payload}
 	n.router.MarkOriginated(dg.ID)
 	// returnTrace runs inside the inbound PACKET_IN write callback (a CoreBluetooth
 	// delegate callback); notifying the central from there re-enters CoreBluetooth and
@@ -654,7 +654,7 @@ func (n *Node) relayFlood(a core.Action) {
 		n.sendFramesToLink(link, frames)
 	}
 	// Also notify server-side subscribers
-	priority := a.Datagram.Protocol == core.ProtocolBLEEdgeChat || a.Datagram.Protocol == core.ProtocolBLEEdgeControl
+	priority := a.Datagram.Protocol == core.ProtocolSidepathChat || a.Datagram.Protocol == core.ProtocolSidepathControl
 	for _, notifier := range notifiers {
 		n.notifyFrames(notifier, frames, priority)
 	}
@@ -736,13 +736,13 @@ func (n *Node) SendText(dst core.NodeID, text string, ttl uint8) error {
 	if err != nil {
 		return err
 	}
-	dg := core.Datagram{Version: core.DatagramVersion, ID: ctx.DatagramID, Source: n.nodeID, Destination: core.BroadcastNodeID, TTL: ttl, Protocol: core.ProtocolBLEEdgeChat, Payload: payload}
+	dg := core.Datagram{Version: core.DatagramVersion, ID: ctx.DatagramID, Source: n.nodeID, Destination: core.BroadcastNodeID, TTL: ttl, Protocol: core.ProtocolSidepathChat, Payload: payload}
 	return n.transmit(dg)
 }
 
 // SendMeshCoreRaw floods an opaque, complete MeshCore over-the-air packet into
-// the BLEEdge mesh as a v3 MESHCORE_PACKET datagram. The bytes are carried
-// verbatim; BLEEdge routing treats the payload as opaque.
+// the Sidepath mesh as a v3 MESHCORE_PACKET datagram. The bytes are carried
+// verbatim; Sidepath routing treats the payload as opaque.
 func (n *Node) SendMeshCoreRaw(payload []byte) error {
 	_, err := n.SendMeshCoreRawWithInfo(payload)
 	return err
@@ -754,7 +754,7 @@ func (n *Node) SendMeshCoreRawWithInfo(payload []byte) (TransmitInfo, error) {
 }
 
 // SendMeshCoreRawTo sends an opaque MeshCore packet to a specific reachable
-// BLEEdge neighbor as a v3 MESHCORE_PACKET datagram.
+// Sidepath neighbor as a v3 MESHCORE_PACKET datagram.
 func (n *Node) SendMeshCoreRawTo(dst core.NodeID, payload []byte) error {
 	_, err := n.SendMeshCoreRawToWithInfo(dst, payload)
 	return err
@@ -763,7 +763,7 @@ func (n *Node) SendMeshCoreRawTo(dst core.NodeID, payload []byte) error {
 func (n *Node) SendMeshCoreRawToWithInfo(dst core.NodeID, payload []byte) (TransmitInfo, error) {
 	dg, ok := n.router.NewUnicast(dst, core.ProtocolMeshCorePacket, payload, 0, core.DefaultFloodTTL, true)
 	if !ok {
-		return TransmitInfo{}, fmt.Errorf("no direct BLEEdge route to %s", dst)
+		return TransmitInfo{}, fmt.Errorf("no direct Sidepath route to %s", dst)
 	}
 	return n.transmitWithInfo(dg)
 }
@@ -780,7 +780,7 @@ func (n *Node) SendBridgedAck(dst core.NodeID, bridgedID core.DatagramID, meshHa
 }
 
 // MeshCoreCandidatesForHash resolves a MeshCore node hash (a 1–2 byte public-key
-// prefix) to every BLEEdge node whose public key matches the prefix AND to which we
+// prefix) to every Sidepath node whose public key matches the prefix AND to which we
 // currently have a route — direct neighbors or multi-hop source routes via topology.
 //
 // MeshCore direct messages address the recipient by only the first byte(s) of its
@@ -826,7 +826,7 @@ func (n *Node) SendTyping(dst core.NodeID) error {
 	if err != nil {
 		return err
 	}
-	dg, ok := n.router.NewUnicast(dst, core.ProtocolBLEEdgeChat, payload, 0, 4, false)
+	dg, ok := n.router.NewUnicast(dst, core.ProtocolSidepathChat, payload, 0, 4, false)
 	if !ok {
 		return fmt.Errorf("no route to %s", dst)
 	}
@@ -843,7 +843,7 @@ func (n *Node) SendChatTo(dst core.NodeID, recipientPub []byte, text string) err
 	if err != nil {
 		return err
 	}
-	dg, ok := n.router.NewUnicast(dst, core.ProtocolBLEEdgeChat, env, uint16(core.FlagAckRequested), 4, false)
+	dg, ok := n.router.NewUnicast(dst, core.ProtocolSidepathChat, env, uint16(core.FlagAckRequested), 4, false)
 	if !ok {
 		return fmt.Errorf("no route to %s", dst)
 	}
@@ -885,7 +885,7 @@ func (n *Node) SendTrace(dst core.NodeID, route []core.NodeID) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: dst, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolBLEEdgeControl, Payload: payload}
+	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: dst, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolSidepathControl, Payload: payload}
 	n.router.MarkOriginated(dg.ID)
 	return tag, n.transmitToRoute(dg)
 }
@@ -924,7 +924,7 @@ func (n *Node) transmitWithInfo(dg core.Datagram) (TransmitInfo, error) {
 		n.sendFramesToLink(link, frames)
 	}
 	// Also send to server-side subscribers (peers that connected TO us)
-	priority := dg.Protocol == core.ProtocolBLEEdgeChat || dg.Protocol == core.ProtocolBLEEdgeControl
+	priority := dg.Protocol == core.ProtocolSidepathChat || dg.Protocol == core.ProtocolSidepathControl
 	for _, notifier := range notifiers {
 		n.notifyFrames(notifier, frames, priority)
 	}
@@ -1174,15 +1174,15 @@ func (n *Node) PlatformFor(id core.NodeID) string {
 	return n.router.PlatformFor(id)
 }
 
-// LoadOrCreateIdentity loads the Ed25519 identity seed from ~/.bleedge/seed or
+// LoadOrCreateIdentity loads the Ed25519 identity seed from ~/.sidepath/seed or
 // creates and persists a new one. NodeID is derived as pubkey[:8].
 func LoadOrCreateIdentity() (*core.Identity, error) {
-	path := filepath.Join(os.Getenv("HOME"), ".bleedge", "seed")
+	path := filepath.Join(os.Getenv("HOME"), ".sidepath", "seed")
 	return core.LoadOrCreateIdentity(path)
 }
 
 func LoadIncrementEpoch() (uint64, error) {
-	path := filepath.Join(os.Getenv("HOME"), ".bleedge", "epoch")
+	path := filepath.Join(os.Getenv("HOME"), ".sidepath", "epoch")
 	return core.LoadIncrementEpoch(path)
 }
 

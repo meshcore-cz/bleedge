@@ -2,7 +2,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-bin="$(mktemp -t bleedge_v3_host_test.XXXXXX)"
+bin="$(mktemp -t sidepath_v3_host_test.XXXXXX)"
 trap 'rm -f "$bin"' EXIT
 
 echo "==> compiling v3 host harness"

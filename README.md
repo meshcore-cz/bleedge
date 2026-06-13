@@ -1,13 +1,13 @@
-# BLEEdge — Bluetooth LE Coded PHY Mesh Transport PoC
+# Sidepath Protocol — Bluetooth LE Coded PHY Mesh Transport PoC
 
-BLEEdge is a proof-of-concept long-range BLE mesh transport layer using
+Sidepath Protocol is a proof-of-concept long-range BLE mesh transport layer using
 **LE Coded PHY** (S=8 coding, 125 kbps, ~4× standard range improvement).
 It consists of:
 
 - A pure-Go routing engine with no Bluetooth dependencies (`core/`)
-- A Linux CLI daemon (`bleedge-listen`) using BlueZ D-Bus — **primary Long Range target**
-- A macOS CLI daemon (`bleedge-macos`) using CoreBluetooth — 1M PHY debug only
-- An in-memory Go simulator (`bleedge-simulate`) with no BLE hardware needed
+- A Linux CLI daemon (`sidepath-listen`) using BlueZ D-Bus — **primary Long Range target**
+- A macOS CLI daemon (`sidepath-macos`) using CoreBluetooth — 1M PHY debug only
+- An in-memory Go simulator (`sidepath-simulate`) with no BLE hardware needed
 - A native Kotlin Android app with Jetpack Compose UI
 
 ---
@@ -28,7 +28,7 @@ It consists of:
 │ linux/          │  │ macos/           │  │ android/app/.../                 │
 │ adapter.go      │  │ node.go          │  │ core/     (Kotlin port)          │
 │ scanner.go      │  │ peer_link.go     │  │ ble/      (BLEManager etc.)      │
-│ gatt_server.go  │  │ (CoreBluetooth,  │  │ service/  (BLEEdgeService)       │
+│ gatt_server.go  │  │ (CoreBluetooth,  │  │ service/  (Sidepath service)     │
 │                 │  │  1M debug only)  │  │
 │ gatt_client.go  │  │ ui/       (Compose UI)           │
 │ peer_link.go    │  └─────────────────────────────────┘
@@ -36,8 +36,8 @@ It consists of:
 └────────┬────────┘
          │
 ┌────────▼────────────────────────────────────────────┐
-│ cmd/bleedge-listen/main.go   (Linux CLI)            │
-│ cmd/bleedge-simulate/main.go (In-memory simulator)  │
+│ cmd/sidepath-listen/main.go   (Linux CLI)            │
+│ cmd/sidepath-simulate/main.go (In-memory simulator)  │
 └────────────────────────────────────────────────────┘
 ```
 
@@ -157,30 +157,30 @@ uname -r
 ### Build
 
 ```bash
-go build -o bleedge-listen ./cmd/bleedge-listen
+go build -o sidepath-listen ./cmd/sidepath-listen
 ```
 
 ### Required capabilities
 
 Either run as root:
 ```bash
-sudo ./bleedge-listen --adapter hci0
+sudo ./sidepath-listen --adapter hci0
 ```
 
 Or grant capabilities to the binary:
 ```bash
-sudo setcap 'cap_net_admin+eip cap_net_raw+eip' ./bleedge-listen
-./bleedge-listen --adapter hci0
+sudo setcap 'cap_net_admin+eip cap_net_raw+eip' ./sidepath-listen
+./sidepath-listen --adapter hci0
 ```
 
 ### Usage
 
 ```
-bleedge-listen [flags]
+sidepath-listen [flags]
 
 Flags:
   --adapter      hci0             Bluetooth adapter (default: hci0)
-  --node-id      <hex>            8-byte NodeID in hex; loaded from ~/.bleedge/node-id if omitted
+  --node-id      <hex>            8-byte NodeID in hex; loaded from ~/.sidepath/node-id if omitted
   --phy          1m               PHY mode: 1m (default) | coded-only | coded-preferred
   --allow-peer   <hex>            Allowed peer NodeID; repeatable; empty = allow all
   --json                          Output log as JSON lines
@@ -192,11 +192,11 @@ Flags:
 ## macOS build
 
 > **Important:** macOS CoreBluetooth does **not** expose LE Coded PHY control,
-> and cannot broadcast manufacturer data as a peripheral. `bleedge-macos` always
-> operates in `1m` mode and is discovered by peers via its BLEEdge service UUID.
+> and cannot broadcast manufacturer data as a peripheral. `sidepath-macos` always
+> operates in `1m` mode and is discovered by peers via its Sidepath service UUID.
 > It is useful for smoke-testing the routing engine and packet format, but
 > **cannot** be used as a node in the Long Range demonstration. Use
-> `bleedge-listen` on Linux for Coded PHY testing.
+> `sidepath-listen` on Linux for Coded PHY testing.
 
 ### Prerequisites
 
@@ -207,7 +207,7 @@ Flags:
 ### Build
 
 ```bash
-go build -o bleedge-macos ./cmd/bleedge-macos
+go build -o sidepath-macos ./cmd/sidepath-macos
 ```
 
 ### Permissions
@@ -220,10 +220,10 @@ your IDE) to the allowed apps list.
 ### Usage
 
 ```
-bleedge-macos [flags]
+sidepath-macos [flags]
 
 Flags:
-  --node-id      <hex>    8-byte NodeID in hex; loaded from ~/.bleedge/node-id if omitted
+  --node-id      <hex>    8-byte NodeID in hex; loaded from ~/.sidepath/node-id if omitted
   --allow-peer   <hex>    Allowed peer NodeIDs, comma-separated; empty = allow all
   --send         <text>   Send a broadcast text message 3 s after startup (smoke test)
   --json                  Output log as JSON lines
@@ -235,7 +235,7 @@ Flags:
 1. The Android app defaults to `1m` (no change needed; selectable on the Overview tab).
 2. Start the macOS listener:
    ```bash
-   ./bleedge-macos --verbose
+   ./sidepath-macos --verbose
    ```
 3. The app and the Mac will discover each other and connect.
 4. Send a message from the Android app — it should appear in the macOS log:
@@ -257,7 +257,7 @@ Flags:
 
 On device A (Linux or Android), note the Node ID displayed at startup:
 ```
-bleedge listener started node=aabbccdd11223344 phy=coded-only
+sidepath listener started node=aabbccdd11223344 phy=coded-only
 ```
 
 On device B (Android), enter device A's Node ID in the Destination field and tap Send.
@@ -275,7 +275,7 @@ Topology: `Android-A  ←LE Coded→  Android-B  ←LE Coded→  Linux-gateway`
 
 1. Start Linux gateway, note its Node ID (call it `gateway-id`):
    ```bash
-   sudo ./bleedge-listen --adapter hci0 --phy coded-only --verbose
+   sudo ./sidepath-listen --adapter hci0 --phy coded-only --verbose
    ```
 
 2. Start Android-B, add Android-A to its allowlist (or leave empty to allow all).
@@ -298,7 +298,7 @@ Topology: `Android-A  ←LE Coded→  Android-B  ←LE Coded→  Linux-gateway`
 
 Only accept packets from specific Android nodes:
 ```bash
-sudo ./bleedge-listen \
+sudo ./sidepath-listen \
   --allow-peer aabbccdd11223344 \
   --allow-peer 1122334455667788 \
   --phy coded-only
@@ -311,7 +311,7 @@ sudo ./bleedge-listen \
 No BLE hardware required:
 
 ```bash
-go run ./cmd/bleedge-simulate
+go run ./cmd/sidepath-simulate
 ```
 
 Runs 35 deterministic test scenarios covering flood routing, deduplication, TTL exhaustion,
@@ -323,7 +323,7 @@ trace, peer disconnect, topology expiration, and large payload fragmentation.
 ## Repository layout
 
 ```
-go.mod                          Go module: github.com/burningtree/bleedge
+go.mod                          Go module: github.com/meshcore-cz/sidepath-protocol
 core/                           Pure-Go routing engine (no BLE dependencies)
   types.go                      NodeID, PacketType, PHY, Capabilities, etc.
   packet.go                     CBOR encode/decode for Packet and AnnouncePayload
@@ -342,20 +342,20 @@ linux/                          BlueZ D-Bus bindings
   peer_link.go                  core.PeerLink implementation over GattClient
   node.go                       Top-level node: scan, connect, route, announce
 cmd/
-  bleedge-listen/main.go        Linux CLI (BlueZ, LE Coded PHY)
-  bleedge-macos/main.go         macOS CLI (CoreBluetooth, 1M debug only)
-  bleedge-simulate/main.go      In-memory simulator (35 test scenarios)
+  sidepath-listen/main.go        Linux CLI (BlueZ, LE Coded PHY)
+  sidepath-macos/main.go         macOS CLI (CoreBluetooth, 1M debug only)
+  sidepath-simulate/main.go      In-memory simulator (35 test scenarios)
 android/
   settings.gradle
   build.gradle
   gradle.properties
-  app/build.gradle
-  app/src/main/AndroidManifest.xml
-  app/src/main/java/cz/arnal/bleedge/
-    core/                       Kotlin port of core/
+  sidepath-protocol/            Pure-Kotlin Sidepath protocol library
+  meshward-chat/                Pure-Kotlin Meshward payload protocol library
+  common/src/main/java/cz/meshcore/sidepath/
     ble/                        BLEManager, Advertiser, Scanner, GattServer, GattClient, PeerLink
-    service/BLEEdgeService.kt   Foreground service with StateFlows
-    ui/                         Compose UI: MainActivity, MainViewModel, MainScreen
+    service/SidepathService.kt   Foreground service with StateFlows
+  chat-app/src/main/java/cz/meshcore/meshward/
+    ui/                         Compose UI, including ChatRoot
 ```
 
 ---

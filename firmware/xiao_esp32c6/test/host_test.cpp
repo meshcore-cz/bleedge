@@ -1,4 +1,4 @@
-// Host harness for BLEEdge v3 firmware mesh logic.
+// Host harness for Sidepath v3 firmware mesh logic.
 //
 // Build: c++ -std=c++17 -I. -I.. host_test.cpp ../mesh.cpp -o host_test
 #include <cstdio>

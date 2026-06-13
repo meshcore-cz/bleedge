@@ -1,28 +1,28 @@
-# BLEEdge Protocol Specification
+# Sidepath Protocol Specification
 
 **Datagram protocol version: 3**
 **GATT frame version: 2**
 
-> BLEEdge is a protocol-agnostic Bluetooth Low Energy mesh transport. It routes
+> Sidepath Protocol is a protocol-agnostic Bluetooth Low Energy mesh transport. It routes
 > opaque datagrams between nearby nodes. MeshCore packets and future
 > application-defined protocols are carried as payloads and are not interpreted
 > by the routing engine.
 
-This document is the single source of truth for BLEEdge v3 on-the-wire behavior.
-BLEEdge v3 is intentionally incompatible with earlier proof-of-concept packet
+This document is the single source of truth for Sidepath v3 on-the-wire behavior.
+Sidepath v3 is intentionally incompatible with earlier proof-of-concept packet
 formats.
 
 ---
 
 ## 1. Design principles
 
-BLEEdge has three layers:
+Sidepath has three layers:
 
 ```text
 BLE GATT frame
-└── BLEEdge datagram
+└── Sidepath datagram
     └── Payload protocol
-        ├── BLEEdge control
+        ├── Sidepath control
         ├── MeshCore packet
         └── application-defined protocol
 ```
@@ -32,14 +32,14 @@ The layers have distinct responsibilities:
 | Layer            | Responsibility                                                                |
 | ---------------- | ----------------------------------------------------------------------------- |
 | BLE GATT frame   | Hop-local fragmentation, reassembly, and CRC validation                       |
-| BLEEdge datagram | End-to-end datagram identity, routing, TTL, deduplication, and path recording |
+| Sidepath datagram | End-to-end datagram identity, routing, TTL, deduplication, and path recording |
 | Payload protocol | Application-specific or encapsulated protocol data                            |
 
-The BLEEdge routing engine MUST treat application payloads as opaque bytes.
+The Sidepath routing engine MUST treat application payloads as opaque bytes.
 Unknown payload protocols MUST still be forwarded normally.
 
-BLEEdge-native announces, acknowledgements, and diagnostics use the built-in
-`BLEEDGE_CONTROL` protocol. They MUST NOT be encoded as MeshCore packets.
+Sidepath-native announces, acknowledgements, and diagnostics use the built-in
+`SIDEPATH_CONTROL` protocol. They MUST NOT be encoded as MeshCore packets.
 
 ---
 
@@ -47,20 +47,20 @@ BLEEdge-native announces, acknowledgements, and diagnostics use the built-in
 
 | Term                 | Meaning                                                               |
 | -------------------- | --------------------------------------------------------------------- |
-| **Node**             | A BLEEdge participant with an Ed25519 identity                        |
-| **NodeID**           | Compact 10-byte BLEEdge routing address derived from the public key   |
-| **Peer link**        | One direct BLE connection between two BLEEdge nodes                   |
+| **Node**             | A Sidepath participant with an Ed25519 identity                        |
+| **NodeID**           | Compact 10-byte Sidepath routing address derived from the public key   |
+| **Peer link**        | One direct BLE connection between two Sidepath nodes                   |
 | **Frame**            | Hop-local GATT transport unit carrying one fragment                   |
-| **Datagram**         | End-to-end BLEEdge routing unit reconstructed from one or more frames |
+| **Datagram**         | End-to-end Sidepath routing unit reconstructed from one or more frames |
 | **Payload protocol** | Protocol identified by the datagram `protocol` field                  |
-| **Control message**  | BLEEdge-native message carried using `BLEEDGE_CONTROL`                |
+| **Control message**  | Sidepath-native message carried using `SIDEPATH_CONTROL`                |
 | **Gateway**          | Node that injects or extracts packets for another protocol            |
 
 ---
 
 ## 3. Identity
 
-A BLEEdge node identity is an Ed25519 keypair as specified by RFC 8032.
+A Sidepath node identity is an Ed25519 keypair as specified by RFC 8032.
 
 * A node stores a random 32-byte Ed25519 seed.
 * The seed MUST be persisted and MUST NOT be shared.
@@ -129,15 +129,15 @@ version(1) | public_key(32) | provisional_caps(2)
 
 A node SHOULD advertise:
 
-* the BLEEdge service UUID; and
+* the Sidepath service UUID; and
 * manufacturer-specific data with company ID `0xBEED` and payload equal to the
   raw 10-byte NodeID.
 
 A scanner MUST accept a device that advertises either the manufacturer data or
-the BLEEdge service UUID. Service-UUID-only discovery is required for platforms
+the Sidepath service UUID. Service-UUID-only discovery is required for platforms
 that cannot advertise manufacturer-specific data.
 
-A scanner SHOULD apply BLEEdge filtering in application code rather than relying
+A scanner SHOULD apply Sidepath filtering in application code rather than relying
 on a hardware scan filter, because hardware filtering can interfere with BLE
 Coded-PHY discovery on some devices.
 
@@ -163,7 +163,7 @@ The default is `1m` for interoperability.
 
 ## 5. GATT frame format
 
-A frame is a hop-local fragment of a serialized BLEEdge datagram.
+A frame is a hop-local fragment of a serialized Sidepath datagram.
 
 The frame header is fixed-width and big-endian except where explicitly stated.
 
@@ -183,7 +183,7 @@ offset  size  field
 | `transfer_id`    | Random hop-local identifier for this serialized transmission |
 | `fragment_index` | Zero-based fragment index                                    |
 | `fragment_count` | Total number of fragments                                    |
-| `payload_crc32`  | CRC-32/IEEE of the complete serialized BLEEdge datagram      |
+| `payload_crc32`  | CRC-32/IEEE of the complete serialized Sidepath datagram      |
 | `data`           | Fragment bytes                                               |
 
 ### 5.1 `transfer_id` and datagram `id`
@@ -213,14 +213,14 @@ MAX_FRAME_DATA = 177 bytes
 ```
 
 A frame MUST fit within one GATT write. Nodes MAY negotiate a larger ATT MTU,
-but MUST NOT exceed `MAX_FRAME_SIZE` for BLEEdge frames.
+but MUST NOT exceed `MAX_FRAME_SIZE` for Sidepath frames.
 
 All frames belonging to one transmission share the same `transfer_id`,
 `fragment_count`, and `payload_crc32`.
 
 ### 5.3 Frame transmission reliability
 
-BLEEdge does not define per-frame ACKs, so a sender is responsible for making a
+Sidepath does not define per-frame ACKs, so a sender is responsible for making a
 single hop transmission complete enough for the receiver to reassemble it.
 
 For a transmission with `fragment_count > 1`, an implementation MUST NOT
@@ -251,9 +251,9 @@ Incomplete reassembly buffers expire after 10 seconds without a new fragment.
 
 ---
 
-## 6. BLEEdge datagram
+## 6. Sidepath datagram
 
-A BLEEdge datagram is encoded as a CBOR map with compact integer keys. Field
+A Sidepath datagram is encoded as a CBOR map with compact integer keys. Field
 order is irrelevant. Keys are authoritative.
 
 | Key | Field          | Type               | Required | Notes                                             |
@@ -262,7 +262,7 @@ order is irrelevant. Keys are authoritative.
 |   2 | `id`           | bytes(16)          | yes      | Random end-to-end datagram ID                     |
 |   3 | `source`       | bytes(10)          | yes      | Originating NodeID                                |
 |   4 | `destination`  | bytes(10)          | yes      | Zero NodeID means broadcast                       |
-|   5 | `ttl`          | uint8              | yes      | Remaining BLEEdge hop budget                      |
+|   5 | `ttl`          | uint8              | yes      | Remaining Sidepath hop budget                      |
 |   6 | `route`        | array of bytes(10) | no       | Explicit source route, including destination      |
 |   7 | `route_cursor` | uint8              | no       | Index of the next expected route hop; default `0` |
 |   8 | `path`         | array of bytes(10) | no       | Nodes visited so far; default empty               |
@@ -293,10 +293,10 @@ For source-routed datagrams:
 
 ### 6.2 TTL policy
 
-TTL remains mandatory for every BLEEdge datagram. Deduplication suppresses
+TTL remains mandatory for every Sidepath datagram. Deduplication suppresses
 ordinary duplicate deliveries, while TTL provides a hard propagation bound
 across cache expiry, node restarts, malformed traffic, and accidentally bridged
-BLEEdge scopes.
+Sidepath scopes.
 
 ```text
 MAX_TTL           = 16
@@ -308,7 +308,7 @@ ANNOUNCE_TTL      = 5
 TTL counts receiving hops:
 
 * `ttl = 1` reaches one directly connected peer and is not relayed further;
-* `ttl = 5` reaches nodes up to five BLEEdge hops away;
+* `ttl = 5` reaches nodes up to five Sidepath hops away;
 * `ttl = 0` is invalid on reception;
 * an incoming datagram with `ttl > MAX_TTL` MUST be dropped; and
 * a source-routed datagram MUST use `ttl = len(route)` when originated.
@@ -321,12 +321,12 @@ larger known paths.
 
 |      Bit | Name            | Meaning                                                      |
 | -------: | --------------- | ------------------------------------------------------------ |
-| `0x0001` | `ACK_REQUESTED` | Destination should return a BLEEdge ACK after local delivery |
+| `0x0001` | `ACK_REQUESTED` | Destination should return a Sidepath ACK after local delivery |
 
 Rules:
 
 * `ACK_REQUESTED` is valid only for unicast datagrams.
-* A BLEEdge ACK MUST NOT request another BLEEdge ACK.
+* A Sidepath ACK MUST NOT request another Sidepath ACK.
 * Unknown flag bits MUST be ignored when forwarding.
 * Application-specific behavior MUST NOT be added to the routing engine.
   Payload protocols decide whether a datagram needs `ACK_REQUESTED`.
@@ -335,27 +335,27 @@ Rules:
 
 |             Value | Name              | Payload                                                  |
 | ----------------: | ----------------- | -------------------------------------------------------- |
-|          `0x0000` | `BLEEDGE_CONTROL` | BLEEdge-native control message                           |
+|          `0x0000` | `SIDEPATH_CONTROL` | Sidepath-native control message                           |
 |          `0x0001` | `MESHCORE_PACKET` | Complete encoded MeshCore packet                         |
-|          `0x0100` | `BLEEDGE_CHAT`    | Native messenger payload specified in `CHAT_PROTOCOL.md` |
+|          `0x0100` | `SIDEPATH_CHAT`    | Native messenger payload specified in `CHAT_PROTOCOL.md` |
 | `0x0002`–`0x00ff` | unassigned        | Reserved for future registered payload protocols         |
 | `0x0101`–`0x7fff` | unassigned        | Reserved for future registered payload protocols         |
 | `0x8000`–`0xffff` | experimental      | Private or unstable payload protocols                    |
 
 Unknown protocol values MUST be forwarded as opaque payloads.
 
-Encapsulated protocols MUST carry complete packets. BLEEdge MUST NOT copy
-selected inner fields into the BLEEdge header or partially reimplement inner
+Encapsulated protocols MUST carry complete packets. Sidepath MUST NOT copy
+selected inner fields into the Sidepath header or partially reimplement inner
 packet semantics.
 
 ---
 
-## 7. BLEEdge control protocol
+## 7. Sidepath control protocol
 
 A control message is carried in a datagram with:
 
 ```text
-protocol = BLEEDGE_CONTROL
+protocol = SIDEPATH_CONTROL
 ```
 
 The datagram `payload` is a CBOR map:
@@ -371,18 +371,18 @@ Control kinds:
 | ----: | ---------------- | ------------------------------------------------- |
 |     1 | `ANNOUNCE`       | Publish signed node metadata and direct neighbors |
 |     2 | `ACK`            | Confirm local delivery of one datagram            |
-|     3 | `TRACE_REQUEST`  | Request BLEEdge-native route diagnostics          |
-|     4 | `TRACE_RESPONSE` | Return BLEEdge-native route diagnostics           |
+|     3 | `TRACE_REQUEST`  | Request Sidepath-native route diagnostics          |
+|     4 | `TRACE_RESPONSE` | Return Sidepath-native route diagnostics           |
 |     5 | `BRIDGED`        | Notify a sender their message reached an external network (e.g. MeshCore) |
 
 Unknown control kinds MUST be ignored after local delivery. Relays MAY forward
-unknown control kinds according to the outer BLEEdge routing rules.
+unknown control kinds according to the outer Sidepath routing rules.
 
 ---
 
 ## 8. Signed `ANNOUNCE`
 
-An `ANNOUNCE` publishes a node's authoritative BLEEdge identity metadata,
+An `ANNOUNCE` publishes a node's authoritative Sidepath identity metadata,
 capabilities, and directly connected neighbors.
 
 Every field in the announce body except the signature itself is signed.
@@ -396,7 +396,7 @@ source      = announcing node NodeID
 destination = broadcast
 route       = omitted
 ttl         = ANNOUNCE_TTL  # 5
-protocol    = BLEEDGE_CONTROL
+protocol    = SIDEPATH_CONTROL
 flags       = 0
 kind        = ANNOUNCE
 ```
@@ -439,7 +439,7 @@ CBOR encoding. This avoids cross-library differences in CBOR serialization.
 The signed byte sequence is:
 
 ```text
-ascii("BLEEDGE-ANNOUNCE-V1\0")
+ascii("SIDEPATH-ANNOUNCE-V1\0")
 announce_version       [1]
 public_key             [32]
 epoch                  [8]   uint64 little-endian
@@ -513,7 +513,7 @@ announce.
 
 |      Bit | Name        | Meaning                                         |
 | -------: | ----------- | ----------------------------------------------- |
-| `0x0001` | `SENDER`    | Can originate BLEEdge datagrams                 |
+| `0x0001` | `SENDER`    | Can originate Sidepath datagrams                 |
 | `0x0002` | `RECEIVER`  | Can consume locally delivered datagrams         |
 | `0x0004` | `RELAY`     | Can forward datagrams                           |
 | `0x0008` | `GATEWAY`   | Can inject or extract external protocol packets |
@@ -526,8 +526,8 @@ and MUST be ignored by implementations that do not understand them.
 
 ## 9. ACK control message
 
-An ACK confirms local delivery of a specific BLEEdge datagram. It does not
-confirm delivery or interpretation by an encapsulated protocol beyond BLEEdge.
+An ACK confirms local delivery of a specific Sidepath datagram. It does not
+confirm delivery or interpretation by an encapsulated protocol beyond Sidepath.
 
 ### 9.1 ACK body
 
@@ -546,7 +546,7 @@ destination = original.source
 route       = reverse(original.path excluding local destination) + [original.source]
 route_cursor = 0
 ttl         = len(route)
-protocol    = BLEEDGE_CONTROL
+protocol    = SIDEPATH_CONTROL
 flags       = 0
 kind        = ACK
 ```
@@ -564,12 +564,12 @@ omit `ACK_REQUESTED`.
 
 ### 9.3 BRIDGED control message (ACK_BRIDGED)
 
-A gateway that relays a BLEEdge message onto an external network (e.g. a MeshCore
+A gateway that relays a Sidepath message onto an external network (e.g. a MeshCore
 LoRa mesh) MAY notify the original sender with a `BRIDGED` control message. It is
-purely informational — a hint that the message left the BLEEdge mesh — and MUST
+purely informational — a hint that the message left the Sidepath mesh — and MUST
 NOT be relied on for routing or treated as end-to-end delivery confirmation.
 
-Currently emitted for **channel messages** (`BLEEDGE_CHAT` GRP_TXT): when a
+Currently emitted for **channel messages** (`SIDEPATH_CHAT` GRP_TXT): when a
 gateway re-emits a channel datagram as a MeshCore GRP_TXT, it sends one `BRIDGED`
 back to `datagram.source`.
 
@@ -577,7 +577,7 @@ back to `datagram.source`.
 
 | Key | Field        | Type      | Required | Notes                                              |
 | --: | ------------ | --------- | -------- | -------------------------------------------------- |
-|   1 | `bridged_id` | bytes(16) | yes      | id of the bridged BLEEdge datagram                 |
+|   1 | `bridged_id` | bytes(16) | yes      | id of the bridged Sidepath datagram                 |
 |   2 | `bridge_id`  | bytes(10) | yes      | NodeID of the gateway that performed the bridge    |
 |   3 | `mesh_hash`  | bytes     | no       | short hash of the emitted external packet (correlation) |
 
@@ -586,21 +586,21 @@ Generation:
 ```text
 source      = gateway NodeID
 destination = bridged.source
-protocol    = BLEEDGE_CONTROL
+protocol    = SIDEPATH_CONTROL
 kind        = BRIDGED
 ```
 
 It is delivered by source route when one is known, else flooded. A gateway MUST
 emit at most **one** `BRIDGED` per bridged datagram, mirroring its
-"emit onto the external network exactly once" dedup (keyed on the BLEEdge
+"emit onto the external network exactly once" dedup (keyed on the Sidepath
 datagram id). `BRIDGED` MUST NOT request an ACK and MUST NOT itself be bridged.
 
 ---
 
 ## 10. Routing engine
 
-All routing decisions use only the BLEEdge datagram envelope and, where needed,
-BLEEdge control messages.
+All routing decisions use only the Sidepath datagram envelope and, where needed,
+Sidepath control messages.
 
 ### 10.1 Common checks
 
@@ -676,7 +676,7 @@ and always flood; this is conformant.
 
 ## 11. Native trace diagnostics
 
-Trace is a BLEEdge-native control operation. It is not encoded using MeshCore
+Trace is a Sidepath-native control operation. It is not encoded using MeshCore
 trace layouts.
 
 A trace request MUST be source-routed. It does not request a generic ACK.
@@ -732,7 +732,7 @@ Each receiving hop appends one inbound-link sample to `return_samples`.
 | Reassembler    | In-flight frame groups         | 10-second timeout                                  | 5 seconds    |
 
 A node SHOULD learn direct neighbors from established BLE peer links. It SHOULD
-advertise only directly connected BLEEdge neighbors in `ANNOUNCE`.
+advertise only directly connected Sidepath neighbors in `ANNOUNCE`.
 
 A node MUST NOT treat arbitrary entries from a received datagram `path` as its
 own direct neighbors.
@@ -743,7 +743,7 @@ own direct neighbors.
 
 ### 13.1 Complete MeshCore packet encapsulation
 
-BLEEdge can carry a complete encoded MeshCore packet without interpreting its
+Sidepath can carry a complete encoded MeshCore packet without interpreting its
 contents.
 
 ```text
@@ -752,41 +752,41 @@ payload  = complete encoded MeshCore packet
 ```
 
 MeshCore adverts, complete channel packets, traces, acknowledgements,
-encryption, and routing remain MeshCore concerns. BLEEdge MUST NOT extract
+encryption, and routing remain MeshCore concerns. Sidepath MUST NOT extract
 selected fields from a tunneled MeshCore packet into its own datagram envelope
 or partially reimplement the semantics of that tunneled packet.
 
-### 13.2 Native BLEEdge Chat channels
+### 13.2 Native Meshward channels
 
-BLEEdge Chat also defines a native `CHANNEL_TEXT` subtype. Its encrypted
+Meshward also defines a native `CHANNEL_TEXT` subtype. Its encrypted
 `channel_payload` intentionally mirrors the MeshCore `GRP_TXT` payload layout so
-BLEEdge applications can implement compatible channels directly and gateways
+Sidepath applications can implement compatible channels directly and gateways
 can translate channel messages without inventing a second format.
 
 ```text
-protocol = BLEEDGE_CHAT
+protocol = SIDEPATH_CHAT
 kind     = CHANNEL_TEXT
 body.channel_payload = MeshCore-compatible GRP_TXT payload
 ```
 
 This is distinct from complete MeshCore packet encapsulation. Native
-`CHANNEL_TEXT` messages are valid BLEEdge Chat messages and MUST be encoded as
+`CHANNEL_TEXT` messages are valid Meshward messages and MUST be encoded as
 described in `CHAT_PROTOCOL.md`.
 
 The routing engine treats both forms as opaque bytes. Compatibility logic belongs
-to payload adapters, not to the BLEEdge routing core.
+to payload adapters, not to the Sidepath routing core.
 
 Future payload protocols MAY be assigned additional registry values without
-changing the BLEEdge routing engine. Their packet formats are outside the scope
+changing the Sidepath routing engine. Their packet formats are outside the scope
 of this specification.
 
 ---
 
 ## 14. Security considerations
 
-### 14.1 What BLEEdge authenticates
+### 14.1 What Sidepath authenticates
 
-BLEEdge authenticates signed announces. A verified announce binds:
+Sidepath authenticates signed announces. A verified announce binds:
 
 * public key;
 * NodeID;
@@ -801,17 +801,17 @@ BLEEdge authenticates signed announces. A verified announce binds:
 
 Relays cannot alter these values without invalidating the signature.
 
-### 14.2 What BLEEdge does not authenticate
+### 14.2 What Sidepath does not authenticate
 
 The outer routing envelope is mutable during relay. TTL, route cursor, and path
-change hop by hop and are not end-to-end signed by BLEEdge.
+change hop by hop and are not end-to-end signed by Sidepath.
 
 Application payload confidentiality, integrity, and authentication belong to the
 payload protocol. Encapsulated protocols retain their own security model.
 
 ### 14.3 Metadata privacy
 
-Signed announcements are public within the reachable BLEEdge scope. A user MAY
+Signed announcements are public within the reachable Sidepath scope. A user MAY
 leave `name`, `description`, and `platform` empty to reduce exposed metadata.
 
 ---
@@ -858,7 +858,7 @@ A conforming implementation MUST:
 * [ ] encode datagram version `3` using CBOR integer keys 1–11;
 * [ ] infer flood versus source routing from the presence of `route`;
 * [ ] route unknown protocols as opaque payloads;
-* [ ] use `BLEEDGE_CONTROL` for native announces, ACKs, and traces;
+* [ ] use `SIDEPATH_CONTROL` for native announces, ACKs, and traces;
 * [ ] sign every announce field except the signature itself;
 * [ ] verify the exact announce signature layout before trusting topology data;
 * [ ] persist and increment `epoch` on startup and use `epoch` plus `seq` for announce freshness;
@@ -871,9 +871,9 @@ A conforming implementation MUST:
 
 ---
 
-## 17. Migration from BLEEdge v2 proof-of-concept
+## 17. Migration from Sidepath v2 proof-of-concept
 
-BLEEdge v3 intentionally removes the v2 packet taxonomy:
+Sidepath v3 intentionally removes the v2 packet taxonomy:
 
 * remove outer `type`;
 * remove outer `payload_type`;
@@ -883,7 +883,7 @@ BLEEdge v3 intentionally removes the v2 packet taxonomy:
 * rename outer `trace` to `path`;
 * infer routing mode from `route`;
 * replace packet-specific ACK exceptions with `ACK_REQUESTED`;
-* move announce, ACK, and trace under `BLEEDGE_CONTROL`;
+* move announce, ACK, and trace under `SIDEPATH_CONTROL`;
 * move MeshCore encapsulation and application-specific payload handling into
   payload protocol adapters;
 * replace frame `packet_id` with hop-local `transfer_id`; and

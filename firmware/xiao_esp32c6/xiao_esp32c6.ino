@@ -1,4 +1,4 @@
-// BLEEdge v3 relay firmware for Seeed Studio XIAO ESP32-C6.
+// Sidepath v3 relay firmware for Seeed Studio XIAO ESP32-C6.
 //
 // Peripheral/server relay: phones and nodes connect to this board, write v2
 // GATT frames to PACKET_IN, and receive relayed frames from PACKET_OUT.
@@ -251,14 +251,14 @@ static void processSerialAdmin() {
 }
 
 static void loadOrCreateIdentityAndEpoch() {
-#ifdef BLEEDGE_NODE_SEED_HEX
-  if (parseHexSeed(BLEEDGE_NODE_SEED_HEX, g_seed)) {
+#ifdef SIDEPATH_NODE_SEED_HEX
+  if (parseHexSeed(SIDEPATH_NODE_SEED_HEX, g_seed)) {
     Serial.println("[relay] using build-time identity seed");
   } else
 #endif
   {
     Preferences prefs;
-    prefs.begin("bleedge", false);
+    prefs.begin("sidepath", false);
     if (prefs.getBytesLength("seed") == sizeof(g_seed)) {
       prefs.getBytes("seed", g_seed, sizeof(g_seed));
     } else {
@@ -473,10 +473,10 @@ void setup() {
   ledSet(false);
   loadOrCreateIdentityAndEpoch();
   loadAdmins();
-  Serial.printf("\nBLEEdge v3 relay node=%s phy=1m epoch=%llu\n",
+  Serial.printf("\nSidepath v3 relay node=%s phy=1m epoch=%llu\n",
                 nodeIdHex().c_str(), (unsigned long long)g_epoch);
 
-  NimBLEDevice::init("BLEEdge");
+  NimBLEDevice::init("Sidepath");
   NimBLEDevice::setMTU(247);
 
   NimBLEServer* server = NimBLEDevice::createServer();
@@ -509,7 +509,7 @@ void setup() {
   memcpy(mfg + 2, g_nodeId, mesh::NODE_ID_LEN);
   NimBLEAdvertisementData scanData;
   scanData.setManufacturerData(std::string(reinterpret_cast<char*>(mfg), sizeof(mfg)));
-  scanData.setName("BLEEdge");
+  scanData.setName("Sidepath");
   adv->setScanResponseData(scanData);
   adv->start();
   Serial.println("[relay] advertising started");

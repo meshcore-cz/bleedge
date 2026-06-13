@@ -12,7 +12,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/godbus/dbus/v5"
 
-	"github.com/burningtree/bleedge/core"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 // Node is the top-level Linux BLE node that coordinates all subsystems.
@@ -46,7 +46,7 @@ type Node struct {
 // NodeConfig holds configuration for a Node.
 type NodeConfig struct {
 	AdapterName string
-	Identity    *core.Identity // nil = load/generate from ~/.bleedge/seed
+	Identity    *core.Identity // nil = load/generate from ~/.sidepath/seed
 	PHYMode     core.PHYMode
 	Allowlist   []core.NodeID
 	Name        string // primary display label; empty = deterministic default from pubkey
@@ -61,12 +61,12 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	identity := cfg.Identity
 	if identity == nil {
 		var err error
-		identity, err = core.LoadOrCreateIdentity(filepath.Join(os.Getenv("HOME"), ".bleedge", "seed"))
+		identity, err = core.LoadOrCreateIdentity(filepath.Join(os.Getenv("HOME"), ".sidepath", "seed"))
 		if err != nil {
 			return nil, fmt.Errorf("identity: %w", err)
 		}
 	}
-	epoch, err := core.LoadIncrementEpoch(filepath.Join(os.Getenv("HOME"), ".bleedge", "epoch"))
+	epoch, err := core.LoadIncrementEpoch(filepath.Join(os.Getenv("HOME"), ".sidepath", "epoch"))
 	if err != nil {
 		return nil, fmt.Errorf("epoch: %w", err)
 	}
@@ -125,7 +125,7 @@ func (n *Node) Start(ctx context.Context) error {
 		log.Printf("[node] power on: %v (may already be on)", err)
 	}
 
-	log.Printf("bleedge listener started node=%s phy=%s", n.nodeID, n.phyMode)
+	log.Printf("sidepath listener started node=%s phy=%s", n.nodeID, n.phyMode)
 	if n.adapter.CodedPHYSupported {
 		log.Printf("adapter supports coded-phy=yes")
 	} else {
@@ -215,7 +215,7 @@ func (n *Node) SendTrace(dst core.NodeID, route []core.NodeID) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: dst, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolBLEEdgeControl, Payload: payload}
+	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: dst, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolSidepathControl, Payload: payload}
 	n.router.MarkOriginated(dg.ID)
 	return tag, n.transmitToRoute(dg)
 }
@@ -361,7 +361,7 @@ func (n *Node) executeActions(actions []core.Action) {
 }
 
 func (n *Node) deliverLocal(dg core.Datagram) {
-	if dg.Protocol == core.ProtocolBLEEdgeControl {
+	if dg.Protocol == core.ProtocolSidepathControl {
 		ctrl, err := core.DecodeControl(dg.Payload)
 		if err == nil {
 			switch ctrl.Kind {
@@ -398,7 +398,7 @@ func (n *Node) returnTrace(req core.Datagram, body []byte) error {
 		return err
 	}
 	route := reverseTraceRoute(req.Path, req.Source)
-	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: req.Source, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolBLEEdgeControl, Payload: payload}
+	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: req.Source, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolSidepathControl, Payload: payload}
 	n.router.MarkOriginated(dg.ID)
 	return n.transmitToRoute(dg)
 }

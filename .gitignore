@@ -1,7 +1,7 @@
 # Compiled Go binaries (built into the repo root)
-/bleedge-macos
-/bleedge-listen
-/bleedge-simulate
+/sidepath-macos
+/sidepath-listen
+/sidepath-simulate
 
 # Go build/test artifacts
 *.test
@@ -17,3 +17,4 @@ screenshot*
 bin
 local-*
 kotlin-compiler*
+.claude
