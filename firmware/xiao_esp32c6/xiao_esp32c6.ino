@@ -6,6 +6,7 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <esp_random.h>
+#include <esp_system.h>
 
 #include <algorithm>
 #include <array>
@@ -25,11 +26,16 @@ static const uint16_t RELAY_CAPS = mesh::CAP_SENDER | mesh::CAP_RECEIVER | mesh:
 static const char* NODE_PLATFORM = "esp32-c6";
 static const char* NODE_NAME = "";
 static const char* NODE_DESCRIPTION = "";
+#ifndef SIDEPATH_FIRMWARE_VERSION
+#define SIDEPATH_FIRMWARE_VERSION "dev"
+#endif
+static const char* FIRMWARE_VERSION = SIDEPATH_FIRMWARE_VERSION;
 static const size_t FRAME_MTU = 200;
 static const uint32_t ANNOUNCE_INTERVAL_MS = 15000;
 static const int LED_PIN = 15;
 static const bool LED_ACTIVE_LOW = true;
 static const uint32_t LED_BLINK_MS = 60;
+static const uint32_t RESTART_DELAY_MS = 750;
 
 static uint8_t g_nodeId[mesh::NODE_ID_LEN];
 static uint8_t g_seed[32];
@@ -48,6 +54,7 @@ static std::map<uint16_t, std::array<uint8_t, mesh::NODE_ID_LEN>> g_connNode;
 static uint32_t g_announceSeq = 0;
 static uint32_t g_lastAnnounceMs = 0;
 static uint32_t g_ledOffMs = 0;
+static uint32_t g_restartAtMs = 0;
 static uint32_t g_bootMs = 0;
 static uint32_t g_rxDatagrams = 0;
 static uint32_t g_txDatagrams = 0;
@@ -68,6 +75,11 @@ static String adminCommandHelp();
 
 static inline void ledSet(bool on) {
   digitalWrite(LED_PIN, (LED_ACTIVE_LOW ? !on : on) ? HIGH : LOW);
+}
+
+static void pulseRelayLed() {
+  ledSet(true);
+  g_ledOffMs = millis() + LED_BLINK_MS;
 }
 
 static bool parseHexSeed(const char* hex, uint8_t out[32]) {
@@ -204,10 +216,27 @@ static String statsText() {
   return out;
 }
 
+static String versionText() {
+  char epochBuf[32];
+  snprintf(epochBuf, sizeof(epochBuf), "%llu", (unsigned long long)g_epoch);
+  String out;
+  out += "version=" + String(FIRMWARE_VERSION) + "\n";
+  out += "platform=" + String(NODE_PLATFORM) + "\n";
+  out += "built=" + String(__DATE__) + " " + String(__TIME__) + "\n";
+  out += "node=" + nodeIdHex() + "\n";
+  out += "epoch=" + String(epochBuf);
+  return out;
+}
+
 static String handleAdminCommand(String cmd) {
   cmd.trim();
   if (cmd == "help" || cmd == "?") {
-    return "commands: help, sensors, stats, clock, clock.set <YYYY-MM-DDTHH:MM:SSZ>" + adminCommandHelp();
+    return "commands: help, version, restart, sensors, stats, clock, clock.set <YYYY-MM-DDTHH:MM:SSZ>" + adminCommandHelp();
+  }
+  if (cmd == "version") return versionText();
+  if (cmd == "restart" || cmd == "reboot") {
+    g_restartAtMs = millis() + RESTART_DELAY_MS;
+    return "ok: restarting";
   }
   if (cmd == "sensors") return "temperature_c=" + String(temperatureRead(), 2);
   if (cmd == "stats") return statsText();
@@ -284,10 +313,11 @@ static void sendFramesToConn(const std::vector<uint8_t>& dg, uint16_t conn) {
   }
 }
 
-static void floodToPeers(const std::vector<uint8_t>& dg, uint16_t exclude) {
+static bool floodToPeers(const std::vector<uint8_t>& dg, uint16_t exclude) {
   std::vector<std::vector<uint8_t>> frames;
   mesh::fragment(dg.data(), dg.size(), FRAME_MTU, frames);
   g_txDatagrams++;
+  bool sent = false;
   std::vector<uint16_t> targets;
   {
     std::lock_guard<std::mutex> lk(g_peersMu);
@@ -298,8 +328,10 @@ static void floodToPeers(const std::vector<uint8_t>& dg, uint16_t exclude) {
     for (const auto& f : frames) {
       g_packetOut->notify(f.data(), f.size(), h);
       g_txFrames++;
+      sent = true;
     }
   }
+  return sent;
 }
 
 static bool sendToNode(const std::vector<uint8_t>& dg, const uint8_t nodeId[mesh::NODE_ID_LEN]) {
@@ -366,7 +398,7 @@ static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
       return;
     }
     g_floodRelays++;
-    floodToPeers(fwd, sender);
+    if (floodToPeers(fwd, sender)) pulseRelayLed();
     return;
   }
 
@@ -392,6 +424,7 @@ static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
     return;
   }
   g_sourceRelays++;
+  pulseRelayLed();
 }
 
 static void sendAnnounce() {
@@ -426,8 +459,6 @@ static void sendAnnounce() {
   mesh::buildAnnounce(g_nodeId, RELAY_CAPS, g_epoch, seq, ts, id, neighbors.data(), unique.size(),
                       g_pubKey, sig, NODE_NAME, NODE_DESCRIPTION, NODE_PLATFORM, dg);
   g_dedup.seenOrAdd(id);
-  ledSet(true);
-  g_ledOffMs = millis() + LED_BLINK_MS;
   Serial.printf("[relay] ANNOUNCE epoch=%llu seq=%u neighbors=%u\n",
                 (unsigned long long)g_epoch, seq, (unsigned)unique.size());
   floodToPeers(dg, 0xFFFF);
@@ -525,6 +556,11 @@ void loop() {
   if (g_ledOffMs != 0 && now >= g_ledOffMs) {
     ledSet(false);
     g_ledOffMs = 0;
+  }
+  if (g_restartAtMs != 0 && now >= g_restartAtMs) {
+    Serial.println("[relay] restarting");
+    Serial.flush();
+    ESP.restart();
   }
   g_reassembler.reap();
   delay(50);

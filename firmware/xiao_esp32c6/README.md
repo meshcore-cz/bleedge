@@ -68,6 +68,9 @@ Admin commands are available in two places:
 Commands:
 
 - `help` — show supported commands.
+- `version` — show firmware version, build timestamp, platform, node ID, and
+  announce epoch.
+- `restart` — reboot the relay after acknowledging the command.
 - `sensors` — read the ESP32 temperature sensor.
 - `stats` — uptime, peer/neighbor counts, datagram/frame counters, relay counters,
   announce count, and current clock state.
