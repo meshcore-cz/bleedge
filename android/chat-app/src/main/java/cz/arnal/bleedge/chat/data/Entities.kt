@@ -148,4 +148,7 @@ data class Message(
     // Raw outgoing datagram (hex) for messages we sent, so "Packet details" can show our own
     // packet (persisted, unlike the trimmed Rx Log). Empty for incoming messages.
     val packetHex: String = "",
+    // Raw inner MeshCore OTA packet (hex) for a bridged incoming message, so its "Examine" /
+    // MeshCore packet details survive the packet ageing out of the Rx Log or an app restart.
+    val meshCorePacketHex: String = "",
 )

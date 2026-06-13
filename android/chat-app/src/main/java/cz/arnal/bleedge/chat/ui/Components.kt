@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
@@ -53,7 +55,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -409,8 +413,11 @@ fun MessageDetailsSheet(
         if (msg.packetHex.isNotBlank()) vm.decodePacket(msg.packetHex, timestampMs = msg.timestampMs)
         else rxPackets.firstOrNull { it.id.toHex() == msg.id }
     }
-    val meshPacket = remember(meshCorePackets, msg.meshCorePacketId) {
+    // Prefer the live Rx Log entry (full carrier info); else rebuild from the bytes persisted on the
+    // message, so "Examine" / the MeshCore packet button work after it ages out or a restart.
+    val meshPacket = remember(meshCorePackets, msg.meshCorePacketId, msg.meshCorePacketHex) {
         msg.meshCorePacketId.takeIf { it.isNotBlank() }?.let { id -> meshCorePackets.firstOrNull { it.contentId == id } }
+            ?: msg.meshCorePacketHex.takeIf { it.isNotBlank() }?.let { vm.decodeMeshCorePacket(it, msg) }
     }
     var showBlePacket by remember { mutableStateOf(false) }
     var showMeshPacket by remember { mutableStateOf(false) }
@@ -452,36 +459,30 @@ fun MessageDetailsSheet(
                 // Native channel message — the originating node is a real, verified identity.
                 SenderRow("Sender", msg.senderHex, vm, onOpenProfile)
             }
+            // --- Consistent core block: the same rows, in the same order, for every message. ---
+            val messageType = when {
+                msg.peerHex == vm.myNodeHex() -> "Note to self"
+                isChannel -> "Channel message"
+                else -> "Direct message"
+            }
+            DetailRow("Type", messageType)
             DetailRow("Direction", if (msg.incoming) "Incoming" else "Outgoing")
+            // Origin is always shown (BLEEdge vs MeshCore). For a MeshCore packet we can resolve
+            // (live or persisted), the trailing "Examine" chip opens its packet details.
+            DetailRowWithChip(
+                label = "Origin",
+                value = if (msg.viaMeshCore) "MeshCore" else "BLEEdge",
+                chip = if (msg.viaMeshCore && meshPacket != null) "Examine" else null,
+                onChip = { showMeshPacket = true },
+            )
             if (msg.viaMeshCore) {
-                DetailRow("Origin", "MeshCore (bridged from LoRa)")
                 if (msg.meshCoreType.isNotBlank()) DetailRow("MeshCore type", msg.meshCoreType)
                 if (msg.meshCoreRoute.isNotBlank()) {
                     val hops = if (msg.meshCoreHops > 0) " · ${msg.meshCoreHops} hop${if (msg.meshCoreHops == 1) "" else "s"}" else ""
                     DetailRow("MeshCore route", msg.meshCoreRoute + hops)
                 }
                 if (msg.meshCorePacketId.isNotBlank()) {
-                    // Small inline "details" affordance opening the MeshCore packet's Rx Log dialog.
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("MeshCore packet", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(msg.meshCorePacketId, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace)
-                            if (meshPacket != null) {
-                                Surface(
-                                    color = Color(0xFF00838F).copy(alpha = 0.16f),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.clickable { showMeshPacket = true },
-                                ) {
-                                    Text(
-                                        "details",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFF00838F),
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    DetailRow("MeshCore packet", msg.meshCorePacketId)
                 }
             }
             // Outbound bridging: a gateway relayed this channel message onto MeshCore (ACK_BRIDGED).
@@ -492,7 +493,9 @@ fun MessageDetailsSheet(
                 )
             }
             DetailRow("Time", "${dayFmt.format(Date(msg.timestampMs))} ${formatClock(msg.timestampMs)}")
-            if (!msg.incoming) {
+            if (msg.incoming) {
+                DetailRow("Status", "Received")
+            } else {
                 DetailRow("Status", when {
                     // Channels are broadcast and never ACKed — hearing our own message echoed back
                     // is the only confirmation it propagated, so treat an echo as "delivered".
@@ -584,12 +587,20 @@ fun MessageDetailsSheet(
                     }
                 }
             }
-            // Jump to the raw BLEEdge packet in the Rx Log (when it's still buffered).
+            // Packet detail buttons — consistent across messages: a BLEEdge datagram and/or the
+            // inner MeshCore packet, whichever this message carries.
             if (blePacket != null) {
                 OutlinedButton(onClick = { showBlePacket = true }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.AutoMirrored.Filled.ListAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Packet details")
+                    Text("BLEEdge packet")
+                }
+            }
+            if (meshPacket != null) {
+                OutlinedButton(onClick = { showMeshPacket = true }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.AutoMirrored.Filled.ListAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("MeshCore packet")
                 }
             }
         }
@@ -649,6 +660,77 @@ private fun DetailRow(label: String, value: String) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, fontWeight = FontWeight.Medium)
     }
+}
+
+/** A [DetailRow] whose value can carry a trailing teal action chip (e.g. "Examine"). */
+@Composable
+private fun DetailRowWithChip(label: String, value: String, chip: String?, onChip: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(value, fontWeight = FontWeight.Medium)
+            if (chip != null) {
+                Surface(
+                    color = Color(0xFF00838F).copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.clickable(onClick = onChip),
+                ) {
+                    Text(
+                        chip,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF00838F),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The raw-packet section shared by the BLEEdge and MeshCore packet dialogs: a "[label] (N bytes)"
+ * header with a copy-to-clipboard button, above a monospace offset/hex/ascii dump of [bytes].
+ */
+@Composable
+fun RawPacketView(label: String, bytes: ByteArray) {
+    val clipboard = LocalClipboardManager.current
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text("$label (${bytes.size} bytes)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+        IconButton(onClick = { clipboard.setText(AnnotatedString(bytes.joinToString("") { "%02x".format(it.toInt() and 0xFF) })) }) {
+            Icon(Icons.Default.ContentCopy, contentDescription = "Copy packet hex", modifier = Modifier.size(18.dp))
+        }
+    }
+    Text(
+        bytes.toHexDump(),
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(8.dp),
+    )
+}
+
+/** Classic offset / hex / ascii dump, 16 bytes per line. Shared by the packet detail dialogs. */
+private fun ByteArray.toHexDump(): String {
+    if (isEmpty()) return "(empty)"
+    val sb = StringBuilder()
+    var i = 0
+    while (i < size) {
+        sb.append("%04x  ".format(i))
+        val end = minOf(i + 16, size)
+        for (j in i until end) sb.append("%02x ".format(this[j].toInt() and 0xFF))
+        repeat(16 - (end - i)) { sb.append("   ") }
+        sb.append(" ")
+        for (j in i until end) {
+            val c = this[j].toInt() and 0xFF
+            sb.append(if (c in 0x20..0x7e) c.toChar() else '.')
+        }
+        sb.append('\n')
+        i = end
+    }
+    return sb.toString().trimEnd('\n')
 }
 
 // ---- Signal quality indicator -----------------------------------------------

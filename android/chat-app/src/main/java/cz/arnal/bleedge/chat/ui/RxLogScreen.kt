@@ -382,17 +382,7 @@ internal fun PacketDetailDialog(
                 Field("Payload", "${p.payloadSize} bytes")
 
                 Spacer(Modifier.width(4.dp))
-                Text("Raw packet (${p.raw.size} bytes)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
-                Text(
-                    p.raw.toHexDump(),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .padding(8.dp),
-                )
+                RawPacketView("Raw packet", p.raw)
             }
         },
     )
@@ -464,24 +454,3 @@ private fun Field(label: String, value: String) {
 
 private fun ByteArray.toHexLower(): String =
     joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-
-/** Classic offset / hex / ascii dump, 16 bytes per line. */
-private fun ByteArray.toHexDump(): String {
-    if (isEmpty()) return "(empty)"
-    val sb = StringBuilder()
-    var i = 0
-    while (i < size) {
-        sb.append("%04x  ".format(i))
-        val end = minOf(i + 16, size)
-        for (j in i until end) sb.append("%02x ".format(this[j].toInt() and 0xFF))
-        repeat(16 - (end - i)) { sb.append("   ") }
-        sb.append(" ")
-        for (j in i until end) {
-            val c = this[j].toInt() and 0xFF
-            sb.append(if (c in 0x20..0x7e) c.toChar() else '.')
-        }
-        sb.append('\n')
-        i += 16
-    }
-    return sb.toString().trimEnd()
-}

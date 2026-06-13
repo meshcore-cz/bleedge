@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
+import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -45,7 +46,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
-import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -736,9 +736,11 @@ private fun ReactionTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Small pill marking a channel message that arrived over the MeshCore bridge (not native BLEEdge). */
+/** The teal MeshCore-bridge pill, shared by incoming and outgoing messages. [arrow] points the way
+ * the message crossed the bridge (in for received, out for relayed); [label] is the hop-byte count
+ * (e.g. "3B") where known, else "MeshCore". */
 @Composable
-private fun MeshCoreBadge() {
+private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
     Surface(
         color = Color(0xFF00838F).copy(alpha = 0.16f),
         shape = RoundedCornerShape(6.dp),
@@ -749,13 +751,13 @@ private fun MeshCoreBadge() {
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Icon(
-                Icons.Default.Hub,
+                arrow,
                 contentDescription = null,
                 modifier = Modifier.size(11.dp),
                 tint = Color(0xFF00838F),
             )
             Text(
-                "MeshCore",
+                label,
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF00838F),
             )
@@ -763,32 +765,24 @@ private fun MeshCoreBadge() {
     }
 }
 
-/** Small pill on our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). */
+/** Marks an incoming channel message that arrived over the MeshCore bridge. The inbound arrow and
+ * the LoRa hop count ([hops]) replace the old mesh logo + "MeshCore" label. */
 @Composable
-private fun BridgedBadge() {
-    Surface(
-        color = Color(0xFF00838F).copy(alpha = 0.16f),
-        shape = RoundedCornerShape(6.dp),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.CallMade,
-                contentDescription = null,
-                modifier = Modifier.size(11.dp),
-                tint = Color(0xFF00838F),
-            )
-            Text(
-                "MeshCore",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF00838F),
-            )
-        }
-    }
-}
+private fun MeshCoreBadge(hops: Int) =
+    MeshCorePill(
+        Icons.AutoMirrored.Filled.CallReceived,
+        when {
+            hops <= 0 -> "direct"
+            hops == 1 -> "1 hop"
+            else -> "$hops hops"
+        },
+    )
+
+/** Marks our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). The bridge
+ * originates the packet at hop 0, so there is no hop-byte count to show — only the outbound arrow. */
+@Composable
+private fun BridgedBadge() =
+    MeshCorePill(Icons.AutoMirrored.Filled.CallMade, "MeshCore")
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -833,8 +827,12 @@ private fun MessageBubble(
                             fontWeight = FontWeight.SemiBold,
                             modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
                         )
-                        if (msg.viaMeshCore) MeshCoreBadge()
+                        if (msg.viaMeshCore) MeshCoreBadge(msg.meshCoreHops)
                     }
+                } else if (mine && msg.bridgedToMeshCore) {
+                    // Our own message, relayed onto MeshCore — show the bridge pill at the top,
+                    // mirroring where the incoming badge sits (after the sender name).
+                    BridgedBadge()
                 }
                 MessageContent(
                     msg.text,
@@ -865,8 +863,6 @@ private fun MessageBubble(
                             }
                         }
                     } else RouteIndicator(msg.routeHex)
-                    // A gateway relayed this channel message onto MeshCore (ACK_BRIDGED).
-                    if (mine && msg.bridgedToMeshCore) BridgedBadge()
                     // Repeats of this (flooded) message we heard echoed back across the mesh.
                     if (mine && repeatCount > 0) {
                         Icon(

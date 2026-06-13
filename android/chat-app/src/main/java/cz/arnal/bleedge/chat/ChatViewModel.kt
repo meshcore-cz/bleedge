@@ -853,6 +853,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 status = MsgStatus.DELIVERED,
                 routeHex = msg.path.toRouteHex(),
                 read = false,
+                packetHex = msg.raw?.toHex().orEmpty(),
             )
         )
         // The service already verified outer.source == sender_public_key[:10]; save the
@@ -893,6 +894,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     meshCoreRoute = msg.meshCoreRoute.orEmpty(),
                     meshCoreHops = msg.meshCoreHops,
                     meshCorePacketId = msg.meshCorePacketId.orEmpty(),
+                    // Native BLEEdge channel messages carry their raw datagram for "Packet details";
+                    // bridged MeshCore ones carry the inner MeshCore packet (examined separately).
+                    packetHex = msg.raw?.toHex().orEmpty(),
+                    meshCorePacketHex = msg.meshCorePacketRaw?.toHex().orEmpty(),
                 )
             )
             return
@@ -1380,6 +1385,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             path = dg.path, route = dg.route, payloadSize = dg.payload.size, raw = data,
             forUs = dg.isBroadcast || dg.destination.toHex() == nodeId.value.toHex(),
             rssi = rssi, droppedReason = null,
+        )
+    }.getOrNull()
+
+    /**
+     * Rebuilds a [MeshCorePacket] from the raw inner MeshCore bytes persisted on a bridged message
+     * ([Message.meshCorePacketHex]), so its packet details / "Examine" work after the live Rx Log
+     * entry has aged out or the app restarted. The envelope is re-decoded; the BLEEdge carrier
+     * fields come from the message (the carrier datagram id isn't stored, so it stays blank).
+     */
+    fun decodeMeshCorePacket(hex: String, msg: cz.arnal.bleedge.chat.data.Message): cz.arnal.bleedge.meshcore.MeshCorePacket? = runCatching {
+        val raw = hex.hexToBytes()
+        val path = msg.routeHex.split(",").filter { it.isNotBlank() }.map { NodeId(it.hexToBytes()) }
+        cz.arnal.bleedge.meshcore.MeshCorePacket(
+            timestampMs = msg.timestampMs,
+            source = if (msg.bridgeHex.isNotBlank()) NodeId(msg.bridgeHex.hexToBytes()) else NodeId.BROADCAST,
+            datagramId = ByteArray(0),
+            path = path,
+            directRssi = cz.arnal.bleedge.service.RSSI_UNKNOWN,
+            raw = raw,
+            envelope = cz.arnal.bleedge.meshcore.MeshCoreCodec.decodeEnvelope(raw),
+            contentId = msg.meshCorePacketId,
+            channelSender = msg.senderName.ifBlank { null },
+            channelText = msg.text,
         )
     }.getOrNull()
 

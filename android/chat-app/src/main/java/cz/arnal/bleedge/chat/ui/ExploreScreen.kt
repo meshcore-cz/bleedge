@@ -57,23 +57,17 @@ fun ExploreScreen(
     onOpenAbout: () -> Unit,
 ) {
     val discovered by vm.discoveredContacts.collectAsState()
+    val chatItems by vm.chatItems.collectAsState()
+    val myNode by vm.nodeId.collectAsState()
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
-
-    val shown = remember(discovered, query) {
-        if (query.isBlank()) discovered
-        else discovered.filter {
-            it.name.contains(query.trim(), ignoreCase = true) ||
-                it.nodeHex.contains(query.trim(), ignoreCase = true)
-        }
-    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    if (searching) SearchField(query, { query = it }, "Search discovered")
+                    if (searching) SearchField(query, { query = it }, "Search chats & contacts")
                     else Text("Explore")
                 },
                 actions = {
@@ -108,7 +102,17 @@ fun ExploreScreen(
     ) { padding ->
         when {
             searching && query.isBlank() ->
-                SearchHint("Start typing to search discovered contacts…", Modifier.fillMaxSize().padding(padding))
+                SearchHint("Start typing to search chats & contacts…", Modifier.fillMaxSize().padding(padding))
+            searching ->
+                SearchResults(
+                    chats = chatItems,
+                    discovered = discovered,
+                    query = query,
+                    myNodeHex = myNode.toHex(),
+                    onOpenConversation = onOpenConversation,
+                    onOpenProfile = onOpenProfile,
+                    modifier = Modifier.padding(padding),
+                )
             discovered.isEmpty() ->
                 Column(
                     Modifier.fillMaxSize().padding(padding).padding(24.dp),
@@ -124,18 +128,16 @@ fun ExploreScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
-            shown.isEmpty() ->
-                SearchHint("No matching contacts", Modifier.fillMaxSize().padding(padding))
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 item {
                     Text(
-                        "Discovered contacts (${shown.size})",
+                        "Discovered contacts (${discovered.size})",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     )
                 }
-                items(shown, key = { it.pubKeyHex }) { d ->
+                items(discovered, key = { it.pubKeyHex }) { d ->
                     DiscoveredRow(d) { onOpenProfile(d.nodeHex) }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 }
@@ -164,7 +166,7 @@ fun ExploreScreen(
 }
 
 @Composable
-private fun DiscoveredRow(d: DiscoveredContact, onClick: () -> Unit) {
+internal fun DiscoveredRow(d: DiscoveredContact, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,

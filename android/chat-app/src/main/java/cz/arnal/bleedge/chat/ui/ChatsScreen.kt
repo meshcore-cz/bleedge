@@ -58,6 +58,7 @@ fun ChatsScreen(
     onOpenAbout: () -> Unit,
 ) {
     val items by vm.chatItems.collectAsState()
+    val discovered by vm.discoveredContacts.collectAsState()
     val joined by vm.channels.collectAsState()
     val publicJoined = remember(joined) { joined.any { it.kind == ChannelKind.PUBLIC } }
     val myNode by vm.nodeId.collectAsState()
@@ -68,11 +69,6 @@ fun ChatsScreen(
     var showJoin by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-
-    val visible = remember(items, query) {
-        if (query.isBlank()) items
-        else items.filter { it.title.contains(query.trim(), ignoreCase = true) }
-    }
 
     Scaffold(
         topBar = {
@@ -90,7 +86,7 @@ fun ChatsScreen(
                 },
                 title = {
                     if (searching) {
-                        SearchField(query, { query = it }, "Search chats")
+                        SearchField(query, { query = it }, "Search chats & contacts")
                     } else {
                         Text("BLEEdge")
                     }
@@ -120,11 +116,21 @@ fun ChatsScreen(
     ) { padding ->
         when {
             searching && query.isBlank() ->
-                SearchHint("Start typing to search chats…", Modifier.fillMaxSize().padding(padding))
-            visible.isEmpty() ->
-                EmptyState(Modifier.fillMaxSize().padding(padding), searching = searching)
+                SearchHint("Start typing to search chats & contacts…", Modifier.fillMaxSize().padding(padding))
+            searching ->
+                SearchResults(
+                    chats = items,
+                    discovered = discovered,
+                    query = query,
+                    myNodeHex = myNode.toHex(),
+                    onOpenConversation = onOpenConversation,
+                    onOpenProfile = onOpenProfile,
+                    modifier = Modifier.padding(padding),
+                )
+            items.isEmpty() ->
+                EmptyState(Modifier.fillMaxSize().padding(padding), searching = false)
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                items(visible, key = { it.peerHex }) { item ->
+                items(items, key = { it.peerHex }) { item ->
                     ChatRow(
                         item,
                         isSelf = item.peerHex == myNode.toHex(),
@@ -166,7 +172,7 @@ fun ChatsScreen(
 
 /** A merged-list row: a direct conversation or a channel (selected by [ChatListItem.isChannel]). */
 @Composable
-private fun ChatRow(item: ChatListItem, isSelf: Boolean, onClick: () -> Unit, onAvatarClick: () -> Unit) {
+internal fun ChatRow(item: ChatListItem, isSelf: Boolean, onClick: () -> Unit, onAvatarClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,

@@ -140,6 +140,13 @@ data class ReceivedMessage(
     val meshCorePacketId: String? = null,
     val sentAtMs: Long = 0L,
     val timestampMs: Long = System.currentTimeMillis(),
+    // Raw wire datagram (re-encoded), persisted on the stored message so "Packet details" works
+    // for incoming messages even after the packet ages out of the (trimmed) Rx Log. Native BLEEdge
+    // text only — bridged MeshCore messages carry [meshCorePacketRaw] instead.
+    val raw: ByteArray? = null,
+    // Raw inner MeshCore OTA packet bytes (set when fromMeshCore), persisted so the message's
+    // "Examine" / MeshCore packet details survive the packet ageing out of the Rx Log or a restart.
+    val meshCorePacketRaw: ByteArray? = null,
 )
 
 /** A decoded datagram captured for the Rx Log. */
@@ -876,6 +883,7 @@ class BLEEdgeService : Service() {
                         meshCoreRoute = env.route + transport,
                         meshCoreHops = env.hopCount,
                         meshCorePacketId = contentId,
+                        meshCorePacketRaw = dg.payload,
                     )
                 )
             }
@@ -940,16 +948,16 @@ class BLEEdgeService : Service() {
         val ctx = ChatContext(dg.id, dg.source, dg.destination)
         val msg = when (Chat.peekKind(dg.payload)) {
             ChatKind.PUBLIC_TEXT -> ChatPublicText.open(dg.payload, ctx)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.PUBLIC_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.PUBLIC_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000, raw = dg.encode())
             }
             ChatKind.DIRECT_TEXT -> ChatDirectText.open(id, dg.payload, ctx)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.DIRECT_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.DIRECT_TEXT, it.text, it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000, raw = dg.encode())
             }
             ChatKind.TYPING -> ChatTyping.open(dg.payload, ctx)?.let {
                 ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.TYPING, isTyping = true, senderPublicKey = it.senderPublicKey, path = dg.path, sentAtMs = it.sentAt * 1000)
             }
             ChatKind.CHANNEL_TEXT -> ChatChannel.channelPayload(dg.payload)?.let {
-                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.CHANNEL_TEXT, channelPayload = it, path = dg.path)
+                ReceivedMessage(dg.source, dg.id, dg.protocol, ChatKind.CHANNEL_TEXT, channelPayload = it, path = dg.path, raw = dg.encode())
             }
             ChatKind.DIRECT_REACTION -> ChatDirectReaction.open(id, dg.payload, ctx)?.let {
                 ReceivedMessage(
