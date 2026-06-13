@@ -132,7 +132,6 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 
 	// Load or generate the Ed25519 identity (NodeID = pubkey[:10])
 	var identity *core.Identity
-	var announceEpoch uint64 = 1
 	if seedHex != "" {
 		b, err := hex.DecodeString(seedHex)
 		if err != nil || len(b) != core.SeedSize {
@@ -147,10 +146,10 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 		if err != nil {
 			fatalf("cannot load identity: %v", err)
 		}
-		announceEpoch, err = blenode.LoadIncrementEpoch()
-		if err != nil {
-			fatalf("cannot load epoch: %v", err)
-		}
+	}
+	announceEpoch, err := blenode.LoadIncrementEpoch()
+	if err != nil {
+		fatalf("cannot load epoch: %v", err)
 	}
 
 	// Parse allowlist

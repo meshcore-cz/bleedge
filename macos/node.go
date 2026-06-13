@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meshcore-cz/sidepath-protocol/core"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/darwin"
+	"github.com/meshcore-cz/sidepath-protocol/core"
 	"github.com/pkg/errors"
 )
 
@@ -52,6 +52,7 @@ type Node struct {
 	allowlist     map[core.NodeID]bool
 	verbose       bool
 	announceEpoch uint64
+	announceNow   chan struct{}
 
 	mu sync.Mutex
 	// CoreBluetooth's notification transmit queue is global-ish, not per subscriber.
@@ -130,6 +131,7 @@ func New(cfg Config) *Node {
 		allowlist:     make(map[core.NodeID]bool),
 		verbose:       cfg.Verbose,
 		announceEpoch: cfg.AnnounceEpoch,
+		announceNow:   make(chan struct{}, 1),
 		peers:         make(map[string]*MacPeerLink),
 		notifiers:     make(map[string]*serverNotifier),
 		serverPeerIDs: make(map[string]core.NodeID),
@@ -227,6 +229,7 @@ func (n *Node) buildGATTService() *ble.Service {
 		n.notifiers[addr] = sn
 		n.mu.Unlock()
 		n.logf("server: peer %s subscribed to PACKET_OUT", addr)
+		n.requestAnnounce()
 		<-notifier.Context().Done()
 		sn.close()
 		n.mu.Lock()
@@ -395,6 +398,7 @@ func (n *Node) connectPeer(addr string, adv ble.Advertisement) {
 		RxPHY:     core.PHY1M,
 		PublicKey: peerPub,
 	})
+	n.requestAnnounce()
 
 	// Subscribe to PACKET_OUT
 	if packetOutChar != nil {
@@ -686,41 +690,56 @@ func (n *Node) sendAck(a core.Action) {
 
 func (n *Node) announceLoop(ctx context.Context) {
 	seq := uint32(0)
+	send := func() {
+		dg, err := n.router.BuildAnnounce(n.caps, n.announceEpoch, seq)
+		if err != nil {
+			n.logf("announce build error: %v", err)
+			return
+		}
+		seq++
+		data, err := dg.Encode()
+		if err != nil {
+			n.logf("announce encode error: %v", err)
+			return
+		}
+		frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
+		n.mu.Lock()
+		links := make([]*MacPeerLink, 0, len(n.peers))
+		for _, link := range n.peers {
+			links = append(links, link)
+		}
+		notifiers := make([]*serverNotifier, 0, len(n.notifiers))
+		for _, notifier := range n.notifiers {
+			notifiers = append(notifiers, notifier)
+		}
+		n.mu.Unlock()
+		for _, link := range links {
+			n.sendFramesToLink(link, frames)
+		}
+		for _, notifier := range notifiers {
+			n.notifyFrames(notifier, frames, true)
+		}
+		n.logf("announce sent epoch=%d seq=%d neighbors=%d", n.announceEpoch, seq-1, len(n.router.Neighbors.IDs()))
+	}
+	send()
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-n.announceNow:
+			send()
 		case <-ticker.C:
-			dg, err := n.router.BuildAnnounce(n.caps, n.announceEpoch, seq)
-			if err != nil {
-				continue
-			}
-			seq++
-			n.router.MarkOriginated(dg.ID)
-			data, err := dg.Encode()
-			if err != nil {
-				continue
-			}
-			frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
-			n.mu.Lock()
-			links := make([]*MacPeerLink, 0, len(n.peers))
-			for _, link := range n.peers {
-				links = append(links, link)
-			}
-			notifiers := make([]*serverNotifier, 0, len(n.notifiers))
-			for _, notifier := range n.notifiers {
-				notifiers = append(notifiers, notifier)
-			}
-			n.mu.Unlock()
-			for _, link := range links {
-				n.sendFramesToLink(link, frames)
-			}
-			for _, notifier := range notifiers {
-				n.notifyFrames(notifier, frames, true)
-			}
+			send()
 		}
+	}
+}
+
+func (n *Node) requestAnnounce() {
+	select {
+	case n.announceNow <- struct{}{}:
+	default:
 	}
 }
 
