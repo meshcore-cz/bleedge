@@ -362,8 +362,7 @@ class BLEEdgeService : Service() {
     // ---- DM delivery retry ----
     @Volatile private var dmRetryDelayMs: Long = 3000
     @Volatile private var dmMaxTries: Int = 3
-    private val pendingDms = ConcurrentHashMap<String, PendingDm>()    // key = original id hex
-    private val attemptToOriginal = ConcurrentHashMap<String, String>() // attempt id hex -> original id hex
+    private val pendingDms = ConcurrentHashMap<String, PendingDm>()    // key = datagram id hex
     private val _dmDeliveries = MutableStateFlow<Map<String, DmDelivery>>(emptyMap())
     val dmDeliveries: StateFlow<Map<String, DmDelivery>> = _dmDeliveries.asStateFlow()
 
@@ -371,12 +370,13 @@ class BLEEdgeService : Service() {
         _dmDeliveries.update { m -> m[idHex]?.let { m + (idHex to f(it)) } ?: m }
     }
 
-    /** A direct message awaiting ACK. The text/recipient are stored (not the sealed bytes) because
-     *  each retry uses a fresh datagram id and the AEAD AAD binds to that id, so it must be re-sealed. */
+    /** A direct message awaiting ACK. The sealed bytes + id are kept and re-sent verbatim on each
+     *  retry (same datagram id) so relays and the recipient dedup it — a retry never causes a second
+     *  delivery/processing. Only the route is re-selected per attempt (it isn't part of the AEAD AAD). */
     private class PendingDm(
-        val originalIdHex: String,
-        val text: String,
-        val recipientPub: ByteArray,
+        val idHex: String,
+        val id: ByteArray,
+        val payload: ByteArray,
         val dest: NodeId,
         val floodTtl: Int,
         var attemptsSent: Int,
@@ -1243,64 +1243,63 @@ class BLEEdgeService : Service() {
         dmMaxTries = maxTries.coerceIn(1, 10)
     }
 
-    /** Seals + sends one DIRECT_TEXT attempt (fresh id each time; AAD binds to it). Returns the id. */
-    private fun sendDirectAttempt(text: String, recipientPub: ByteArray, dest: NodeId, floodTtl: Int): ByteArray {
-        val id = identity!!
+    /** (Re)transmits a DIRECT_TEXT datagram with a fixed [id]/[payload], re-selecting the route each
+     *  time (the route isn't covered by the AEAD AAD, so it may adapt to topology between retries). */
+    private fun transmitDirect(id: ByteArray, payload: ByteArray, dest: NodeId, floodTtl: Int) {
+        val self = identity!!
         val route = router.selectRoute(dest)
-        val dgId = Datagram.newDatagramId()
-        val ctx = ChatContext(dgId, id.nodeId, dest)
-        val payload = ChatDirectText.seal(id, recipientPub, ctx, text, System.currentTimeMillis() / 1000)
         val dg = if (route != null)
-            Datagram(id = dgId, source = id.nodeId, destination = dest, ttl = route.size, route = route,
+            Datagram(id = id, source = self.nodeId, destination = dest, ttl = route.size, route = route,
                 protocol = PayloadProtocol.BLEEDGE_CHAT, flags = DatagramFlags.ACK_REQUESTED, payload = payload)
         else
-            Datagram(id = dgId, source = id.nodeId, destination = dest, ttl = floodTtl,
+            Datagram(id = id, source = self.nodeId, destination = dest, ttl = floodTtl,
                 protocol = PayloadProtocol.BLEEDGE_CHAT, flags = DatagramFlags.ACK_REQUESTED, payload = payload)
         router.markOriginated(dg.id)
         transmit(dg)
-        return dg.id
     }
 
     private fun startDmDelivery(text: String, recipientPub: ByteArray, dest: NodeId, floodTtl: Int): ByteArray {
-        val firstId = sendDirectAttempt(text, recipientPub, dest, floodTtl)
-        val origHex = firstId.toHex()
-        val pending = PendingDm(origHex, text, recipientPub, dest, floodTtl, attemptsSent = 1)
-        pendingDms[origHex] = pending
-        attemptToOriginal[origHex] = origHex
+        val self = identity!!
+        // Seal ONCE; the same id + ciphertext is reused for every retry so it's deduped downstream.
+        val dgId = Datagram.newDatagramId()
+        val ctx = ChatContext(dgId, self.nodeId, dest)
+        val payload = ChatDirectText.seal(self, recipientPub, ctx, text, System.currentTimeMillis() / 1000)
+        val idHex = dgId.toHex()
+        transmitDirect(dgId, payload, dest, floodTtl)
+        val pending = PendingDm(idHex, dgId, payload, dest, floodTtl, attemptsSent = 1)
+        pendingDms[idHex] = pending
         _dmDeliveries.update { m ->
-            (m + (origHex to DmDelivery(attemptsSent = 1, maxTries = dmMaxTries))).entries.toList().takeLast(300).associate { it.key to it.value }
+            (m + (idHex to DmDelivery(attemptsSent = 1, maxTries = dmMaxTries))).entries.toList().takeLast(300).associate { it.key to it.value }
         }
         scheduleDmRetry(pending)
-        return firstId
+        return dgId
     }
 
     private fun scheduleDmRetry(p: PendingDm) {
         if (dmMaxTries <= 1) return
         p.job = scope.launch {
             delay(dmRetryDelayMs)
-            if (pendingDms[p.originalIdHex] !== p) return@launch
+            if (pendingDms[p.idHex] !== p) return@launch
             if (p.attemptsSent >= dmMaxTries) {
-                log("DM ${p.originalIdHex.take(8)} unacked after ${p.attemptsSent} tries — giving up", LogTag.MSG)
-                pendingDms.remove(p.originalIdHex)
-                attemptToOriginal.entries.removeAll { it.value == p.originalIdHex }
-                updateDelivery(p.originalIdHex) { it.copy(failed = true) }
+                log("DM ${p.idHex.take(8)} unacked after ${p.attemptsSent} tries — giving up", LogTag.MSG)
+                pendingDms.remove(p.idHex)
+                updateDelivery(p.idHex) { it.copy(failed = true) }
                 return@launch
             }
-            val newId = sendDirectAttempt(p.text, p.recipientPub, p.dest, p.floodTtl)
+            // Re-send the SAME datagram (id + ciphertext) so relays/recipient dedup it — a retry
+            // never causes a duplicate delivery. Only the route is re-selected.
+            transmitDirect(p.id, p.payload, p.dest, p.floodTtl)
             p.attemptsSent += 1
-            attemptToOriginal[newId.toHex()] = p.originalIdHex
-            updateDelivery(p.originalIdHex) { it.copy(attemptsSent = p.attemptsSent) }
+            updateDelivery(p.idHex) { it.copy(attemptsSent = p.attemptsSent) }
             scheduleDmRetry(p)
         }
     }
 
     private fun resolveDmAck(ackedRaw: ByteArray?): ByteArray? {
         if (ackedRaw == null) return null
-        val origHex = attemptToOriginal[ackedRaw.toHex()] ?: return ackedRaw
-        pendingDms.remove(origHex)?.job?.cancel()
-        attemptToOriginal.entries.removeAll { it.value == origHex }
-        updateDelivery(origHex) { it.copy(acked = true) }
-        return origHex.hexToByteArray()
+        pendingDms.remove(ackedRaw.toHex())?.job?.cancel()
+        updateDelivery(ackedRaw.toHex()) { it.copy(acked = true) }
+        return ackedRaw
     }
 
     fun setDescription(description: String) {

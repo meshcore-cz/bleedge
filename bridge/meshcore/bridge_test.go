@@ -31,7 +31,9 @@ func TestClassifyFloodPacket(t *testing.T) {
 	}
 }
 
-func TestClassifyDirectPacketWithRouteHash(t *testing.T) {
+// A TXT_MSG is addressed by its payload dest hash even when a path (trace of traversed repeaters)
+// is present — the path hops are NOT the recipient, so the dest hash takes priority.
+func TestClassifyDirectTxtMsgRoutesByDestHashNotPath(t *testing.T) {
 	raw, err := meshpkt.EncodePacket(meshpkt.Packet{
 		Route:        meshpkt.RouteDirect,
 		Type:         meshpkt.PayloadTxtMsg,
@@ -46,8 +48,8 @@ func TestClassifyDirectPacketWithRouteHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
-	if mode != ForwardDirect || string(target) != string([]byte{0x12, 0x34}) || reason != "" {
-		t.Fatalf("classify direct got mode=%v target=%x reason=%q", mode, target, reason)
+	if mode != ForwardDirect || string(target) != string([]byte{0xab}) || reason != "" {
+		t.Fatalf("classify direct got mode=%v target=%x reason=%q (want dest hash ab)", mode, target, reason)
 	}
 }
 
