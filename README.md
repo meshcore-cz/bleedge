@@ -20,6 +20,8 @@ nearby Sidepath mesh  ↔  gateway  ↔  MeshCore LoRa mesh
 
 The first implementation focuses on **BLE** and **MeshCore**, but the routing layer is designed to carry other [payload protocols](docs/PROTOCOL.md) as well.
 
+<img src="docs/diagram.png" width="75%" />
+
 ---
 
 ## What can Sidepath do?
