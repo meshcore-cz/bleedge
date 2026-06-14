@@ -1,9 +1,9 @@
 //go:build darwin
 
-// Package macos implements a Sidepath node for macOS using CoreBluetooth via go-ble.
-// CoreBluetooth does not expose LE Coded PHY control, so this node always
-// operates in 1m mode and is NOT valid for the Long Range demonstration.
-// It is useful for development and smoke-testing the routing engine over regular BLE.
+// Package macos implements a Sidepath node for macOS. All CoreBluetooth lives in a native Swift
+// helper process (sidepath-macos-ble-helper); this package speaks a length-prefixed stdio protocol
+// to it (see ble_helper.go) and keeps the routing/dedup/neighbor/announce logic. CoreBluetooth does
+// not expose LE Coded PHY, so the node always operates in 1m mode (not valid for Long Range demos).
 package macos
 
 import (
@@ -17,26 +17,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/darwin"
 	"github.com/meshcore-cz/sidepath-protocol/core"
-	"github.com/pkg/errors"
-)
-
-var (
-	serviceUUID   = ble.MustParse("9B7E6A10-7D91-4C19-A3B8-6E2A11F3A001")
-	nodeInfoUUID  = ble.MustParse("9B7E6A10-7D91-4C19-A3B8-6E2A11F3A002")
-	packetInUUID  = ble.MustParse("9B7E6A10-7D91-4C19-A3B8-6E2A11F3A003")
-	packetOutUUID = ble.MustParse("9B7E6A10-7D91-4C19-A3B8-6E2A11F3A004")
-)
-
-const (
-	interFrameDelay       = 20 * time.Millisecond
-	notifyRetryMinDelay   = 40 * time.Millisecond
-	notifyRetryMaxDelay   = 500 * time.Millisecond
-	notifyGlobalPace      = 8 * time.Millisecond
-	notifyBackpressureLog = 2 * time.Second
-	notifyLogAfterRetries = 3
 )
 
 // Node is a macOS Sidepath node.
@@ -54,15 +35,16 @@ type Node struct {
 	announceEpoch uint64
 	announceNow   chan struct{}
 
+	helper *bleHelper
+
 	mu sync.Mutex
-	// CoreBluetooth's notification transmit queue is global-ish, not per subscriber.
-	notifyMu     sync.Mutex
-	notifyNextAt time.Time
-	// peer addr string → link
+	// peer addr string → link (outgoing connections, central role)
 	peers map[string]*MacPeerLink
-	// notifiers for PACKET_OUT (server-side subscribers)
-	notifiers map[string]*serverNotifier
-	// server-side peer addr string → learned NodeID
+	// addrs with an in-flight connect (scan reports duplicates; dedupe attempts)
+	connecting map[string]bool
+	// centrals subscribed to our PACKET_OUT (peripheral role): central_id → true
+	subscribers map[string]bool
+	// server-side peer central_id → learned NodeID
 	serverPeerIDs map[string]core.NodeID
 
 	// joined channels keyed by lowercase PSK hex (see channels.go)
@@ -78,14 +60,6 @@ type TransmitInfo struct {
 	DatagramID    core.DatagramID
 	DatagramBytes int
 	FragmentCount int
-}
-
-type serverNotifier struct {
-	addr      string
-	notifier  ble.Notifier
-	queue     chan []byte
-	priorityQ chan []byte
-	done      chan struct{}
 }
 
 // Config holds startup parameters.
@@ -137,7 +111,8 @@ func New(cfg Config) *Node {
 		announceEpoch: cfg.AnnounceEpoch,
 		announceNow:   make(chan struct{}, 1),
 		peers:         make(map[string]*MacPeerLink),
-		notifiers:     make(map[string]*serverNotifier),
+		connecting:    make(map[string]bool),
+		subscribers:   make(map[string]bool),
 		serverPeerIDs: make(map[string]core.NodeID),
 		channels:      make(map[string]*Channel),
 		logFn:         cfg.LogFn,
@@ -163,194 +138,103 @@ func (n *Node) logf(format string, args ...any) {
 	n.logFn(fmt.Sprintf(format, args...))
 }
 
-// Run initialises the darwin BLE device, registers the GATT service,
-// and starts advertising + scanning concurrently. Blocks until ctx is done.
+// Run spawns the native CoreBluetooth helper, starts advertising + scanning through it, and drives
+// the node from the helper's events. Blocks until ctx is done.
 func (n *Node) Run(ctx context.Context) error {
-	dev, err := darwin.NewDevice()
-	if err != nil {
-		return fmt.Errorf("cannot open CoreBluetooth device: %w", err)
-	}
-	ble.SetDefaultDevice(dev)
-
 	n.logf("node id=%s  phy=1m (CoreBluetooth, no Coded PHY)", n.nodeID)
 	n.logf("NOTE: macOS/CoreBluetooth does not support LE Coded PHY (Long Range) — 1M only")
 
-	if err := ble.AddService(n.buildGATTService()); err != nil {
-		return fmt.Errorf("AddService: %w", err)
+	h, err := startBLEHelper(func(s string) { n.logf("%s", s) }, n.onHelperEvent)
+	if err != nil {
+		return fmt.Errorf("start BLE helper: %w", err)
 	}
+	n.helper = h
+	n.helper.start(n.buildNodeInfo())
+	n.logf("advertising Sidepath service; scanning for peers")
 
-	// Announce loop
 	go n.announceLoop(ctx)
 
-	// Advertising (runs in background goroutine; errors are non-fatal)
-	advCtx, advCancel := context.WithCancel(ctx)
-	defer advCancel()
-	go func() {
-		n.logf("advertising Sidepath service")
-		err := ble.AdvertiseNameAndServices(advCtx, "Sidepath", serviceUUID)
-		if err != nil && !isCtxErr(err) {
-			n.logf("advertiser stopped: %v", err)
-		}
-	}()
-
-	// Scanner — finds Sidepath peers and connects
-	n.logf("scanning for Sidepath peers")
-	err = ble.Scan(ctx, false, n.onAdvertisement, n.scanFilter)
-	if isCtxErr(err) {
-		return nil
-	}
-	return err
+	<-ctx.Done()
+	_ = h.cmd.Process.Kill()
+	return nil
 }
 
-// buildGATTService constructs the Sidepath GATT service with all three characteristics.
-func (n *Node) buildGATTService() *ble.Service {
-	svc := ble.NewService(serviceUUID)
-
-	// NODE_INFO — readable
-	niChar := ble.NewCharacteristic(nodeInfoUUID)
-	niChar.HandleRead(ble.ReadHandlerFunc(func(req ble.Request, rsp ble.ResponseWriter) {
-		data := n.buildNodeInfo()
-		rsp.Write(data)
-	}))
-	svc.AddCharacteristic(niChar)
-
-	// PACKET_IN — writable (write without response)
-	piChar := ble.NewCharacteristic(packetInUUID)
-	piChar.HandleWrite(ble.WriteHandlerFunc(func(req ble.Request, rsp ble.ResponseWriter) {
-		n.handleIncomingFrame(req.Data(), nil, req.Conn().RemoteAddr().String())
-	}))
-	svc.AddCharacteristic(piChar)
-
-	// PACKET_OUT — notifiable
-	poChar := ble.NewCharacteristic(packetOutUUID)
-	poChar.HandleNotify(ble.NotifyHandlerFunc(func(req ble.Request, notifier ble.Notifier) {
-		addr := req.Conn().RemoteAddr().String()
-		sn := n.newServerNotifier(addr, notifier)
+// onHelperEvent dispatches one decoded event from the BLE helper. Runs on the helper reader
+// goroutine; handlers must be safe to call from there.
+func (n *Node) onHelperEvent(header map[string]any, payload []byte) {
+	switch asString(header["type"]) {
+	case "ready":
+		n.logf("BLE helper ready")
+	case "log":
+		n.logf("helper: %s", asString(header["message"]))
+	case "error":
+		n.logf("helper error: %s", asString(header["message"]))
+	case "scan":
+		n.onScan(asString(header["addr"]), asInt(header["rssi"]))
+	case "peer_connected":
+		n.onPeerConnected(asString(header["addr"]), asInt(header["mtu"]), payload)
+	case "peer_failed":
+		addr := asString(header["addr"])
 		n.mu.Lock()
-		if old := n.notifiers[addr]; old != nil {
-			old.close()
-		}
-		n.notifiers[addr] = sn
+		delete(n.connecting, addr)
 		n.mu.Unlock()
-		n.logf("server: peer %s subscribed to PACKET_OUT", addr)
-		n.requestAnnounce()
-		<-notifier.Context().Done()
-		sn.close()
-		n.mu.Lock()
-		if n.notifiers[addr] == sn {
-			delete(n.notifiers, addr)
-		}
-		delete(n.serverPeerIDs, addr)
-		n.mu.Unlock()
-		n.logf("server: peer %s unsubscribed from PACKET_OUT", addr)
-	}))
-	svc.AddCharacteristic(poChar)
-
-	return svc
-}
-
-// scanFilter accepts only advertisements containing the Sidepath service UUID.
-func (n *Node) scanFilter(adv ble.Advertisement) bool {
-	for _, u := range adv.Services() {
-		if u.Equal(serviceUUID) {
-			return true
-		}
+		n.logf("connect %s failed: %s", addr, asString(header["error"]))
+	case "peer_disconnected":
+		n.onPeerDisconnected(asString(header["addr"]))
+	case "central_frame":
+		n.handleIncomingFrameForAddr(asString(header["addr"]), payload)
+	case "subscribed":
+		n.onSubscribed(asString(header["central_id"]))
+	case "unsubscribed":
+		n.onUnsubscribed(asString(header["central_id"]))
+	case "peripheral_frame":
+		n.handleIncomingFrame(payload, nil, asString(header["central_id"]))
 	}
-	return false
 }
 
-// onAdvertisement is called for each matching advertisement.
-// It initiates a connection in a new goroutine.
-func (n *Node) onAdvertisement(adv ble.Advertisement) {
-	addr := adv.Addr().String()
+// onScan reacts to a discovered Sidepath advertisement: connect once per addr.
+func (n *Node) onScan(addr string, rssi int) {
+	if addr == "" {
+		return
+	}
 	n.mu.Lock()
-	_, already := n.peers[addr]
-	n.mu.Unlock()
-	if already {
+	_, connected := n.peers[addr]
+	if connected || n.connecting[addr] {
+		n.mu.Unlock()
 		return
 	}
-
-	n.logf("scan found addr=%s rssi=%d", addr, adv.RSSI())
-	go n.connectPeer(addr, adv)
+	n.connecting[addr] = true
+	n.mu.Unlock()
+	n.logf("scan found addr=%s rssi=%d", addr, rssi)
+	n.helper.connect(addr)
 }
 
-func (n *Node) connectPeer(addr string, adv ble.Advertisement) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	filter := func(a ble.Advertisement) bool { return a.Addr().String() == addr }
-	cln, err := ble.Connect(ctx, filter)
-	if err != nil {
-		n.logf("connect %s failed: %v", addr, err)
-		return
-	}
-
-	// Discover the full profile
-	p, err := cln.DiscoverProfile(true)
-	if err != nil {
-		n.logf("discover profile %s failed: %v", addr, cln.Addr())
-		cln.CancelConnection()
-		return
-	}
-
-	svc := p.Find(ble.NewService(serviceUUID))
-	if svc == nil {
-		n.logf("peer %s has no Sidepath service", addr)
-		cln.CancelConnection()
-		return
-	}
-
-	gattSvc, ok := svc.(*ble.Service)
-	if !ok {
-		cln.CancelConnection()
-		return
-	}
-
-	var nodeInfoChar, packetInChar, packetOutChar *ble.Characteristic
-	for _, c := range gattSvc.Characteristics {
-		switch {
-		case c.UUID.Equal(nodeInfoUUID):
-			nodeInfoChar = c
-		case c.UUID.Equal(packetInUUID):
-			packetInChar = c
-		case c.UUID.Equal(packetOutUUID):
-			packetOutChar = c
-		}
-	}
-
-	if packetInChar == nil {
-		n.logf("peer %s missing PACKET_IN characteristic", addr)
-		cln.CancelConnection()
-		return
-	}
-
-	// Read NODE_INFO
+// onPeerConnected finalizes an outgoing connection the helper completed (connect + discover +
+// NODE_INFO read + MTU + subscribe). [nodeInfo] is the peer's NODE_INFO value.
+func (n *Node) onPeerConnected(addr string, mtu int, nodeInfo []byte) {
 	var peerID core.NodeID
 	var peerPub []byte
-	if nodeInfoChar != nil {
-		data, err := cln.ReadCharacteristic(nodeInfoChar)
-		if err == nil {
-			if ni, ok := core.DecodeNodeInfo(data); ok {
-				peerID = core.NodeIDFromPubKey(ni.PubKey)
-				peerPub = ni.PubKey
-				n.logf("peer node_id=%s caps=0x%04x", peerID, ni.ProvisionalCaps)
-			}
-		}
+	if ni, ok := core.DecodeNodeInfo(nodeInfo); ok {
+		peerID = core.NodeIDFromPubKey(ni.PubKey)
+		peerPub = ni.PubKey
+		n.logf("peer node_id=%s caps=0x%04x", peerID, ni.ProvisionalCaps)
 	}
 
-	// Allowlist check
+	cleanup := func() {
+		n.mu.Lock()
+		delete(n.connecting, addr)
+		n.mu.Unlock()
+		n.helper.disconnect(addr)
+	}
+
 	if len(n.allowlist) > 0 && !n.allowlist[peerID] {
 		n.logf("peer %s (node_id=%s) not in allowlist — disconnecting", addr, peerID)
-		cln.CancelConnection()
+		cleanup()
 		return
 	}
-
-	// Whoever discovers a peer connects to it. BLE discovery can be asymmetric, so we
-	// must NOT gate on NodeID ordering (that risks a deadlock where the only node that
-	// can see a peer is the one told to wait). Drop self-connections and duplicates.
 	if peerID == n.nodeID {
 		n.logf("connected to self — disconnecting")
-		cln.CancelConnection()
+		cleanup()
 		return
 	}
 	n.mu.Lock()
@@ -361,66 +245,84 @@ func (n *Node) connectPeer(addr string, adv ble.Advertisement) {
 			break
 		}
 	}
-	n.mu.Unlock()
 	if dup {
+		n.mu.Unlock()
 		n.logf("peer node_id=%s already connected — dropping duplicate addr=%s", peerID, addr)
-		cln.CancelConnection()
+		cleanup()
 		return
 	}
-
-	// Negotiate MTU
-	mtu, err := cln.ExchangeMTU(512)
-	if err != nil {
-		mtu = 23
-	}
-	n.logf("connected peer=%s mtu=%d tx-phy=1M rx-phy=1M", peerID, mtu)
-
 	link := &MacPeerLink{
 		peerID: peerID,
 		addr:   addr,
-		cln:    cln,
-		piChar: packetInChar,
+		helper: n.helper,
 		mtu:    mtu,
 		txPHY:  core.PHY1M,
 		rxPHY:  core.PHY1M,
-		rssi:   adv.RSSI(),
 	}
-
-	n.mu.Lock()
 	n.peers[addr] = link
+	delete(n.connecting, addr)
 	n.mu.Unlock()
+	n.logf("connected peer=%s mtu=%d tx-phy=1M rx-phy=1M", peerID, mtu)
 
 	if n.onPeerConnect != nil {
 		n.onPeerConnect(peerID)
 	}
-
 	n.router.Neighbors.Upsert(core.Neighbor{
-		ID:        peerID,
-		Direction: core.DirectionOutgoing,
-		RSSI:      adv.RSSI(),
-		TxPHY:     core.PHY1M,
-		RxPHY:     core.PHY1M,
-		PublicKey: peerPub,
+		ID: peerID, Direction: core.DirectionOutgoing, TxPHY: core.PHY1M, RxPHY: core.PHY1M, PublicKey: peerPub,
 	})
 	n.requestAnnounce()
+}
 
-	// Subscribe to PACKET_OUT
-	if packetOutChar != nil {
-		cln.Subscribe(packetOutChar, false, func(data []byte) {
-			n.handleIncomingFrame(data, &peerID, "")
-		})
-	}
-
-	// Wait for disconnect
-	<-cln.Disconnected()
-	n.logf("disconnected peer=%s", peerID)
+// onPeerDisconnected handles a dropped outgoing connection.
+func (n *Node) onPeerDisconnected(addr string) {
 	n.mu.Lock()
+	link := n.peers[addr]
 	delete(n.peers, addr)
+	delete(n.connecting, addr)
 	n.mu.Unlock()
-	n.router.Neighbors.Remove(peerID)
-	if n.onPeerDisconnect != nil {
-		n.onPeerDisconnect(peerID)
+	if link == nil {
+		return
 	}
+	n.logf("disconnected peer=%s", link.peerID)
+	n.router.Neighbors.Remove(link.peerID)
+	if n.onPeerDisconnect != nil {
+		n.onPeerDisconnect(link.peerID)
+	}
+}
+
+// onSubscribed records a central that subscribed to our PACKET_OUT (peripheral role).
+func (n *Node) onSubscribed(centralID string) {
+	if centralID == "" {
+		return
+	}
+	n.mu.Lock()
+	n.subscribers[centralID] = true
+	n.mu.Unlock()
+	n.logf("server: peer %s subscribed to PACKET_OUT", centralID)
+	n.requestAnnounce()
+}
+
+// onUnsubscribed handles a central dropping its PACKET_OUT subscription.
+func (n *Node) onUnsubscribed(centralID string) {
+	n.mu.Lock()
+	delete(n.subscribers, centralID)
+	delete(n.serverPeerIDs, centralID)
+	n.mu.Unlock()
+	n.logf("server: peer %s unsubscribed from PACKET_OUT", centralID)
+}
+
+// handleIncomingFrameForAddr routes a PACKET_OUT indication received from a connected peer (central
+// role), resolving the peer's NodeID from the addr so dedup/reassembly key consistently.
+func (n *Node) handleIncomingFrameForAddr(addr string, data []byte) {
+	n.mu.Lock()
+	link := n.peers[addr]
+	n.mu.Unlock()
+	if link != nil {
+		peerID := link.peerID
+		n.handleIncomingFrame(data, &peerID, "")
+		return
+	}
+	n.handleIncomingFrame(data, nil, addr)
 }
 
 // handleIncomingFrame receives a raw GATT frame, reassembles, decodes and routes.
@@ -482,7 +384,7 @@ func (n *Node) learnNeighbor(dg core.Datagram, fromAddr string) {
 	}
 	if fromAddr != "" {
 		n.mu.Lock()
-		if _, ok := n.notifiers[fromAddr]; ok {
+		if n.subscribers[fromAddr] {
 			n.serverPeerIDs[fromAddr] = nb
 		}
 		n.mu.Unlock()
@@ -657,19 +559,15 @@ func (n *Node) relayFlood(a core.Action) {
 		links = append(links, link)
 		_ = addr
 	}
-	notifiers := make([]*serverNotifier, 0, len(n.notifiers))
-	for _, notifier := range n.notifiers {
-		notifiers = append(notifiers, notifier)
-	}
+	subs := n.subscriberIDsLocked()
 	n.mu.Unlock()
 
 	for _, link := range links {
 		n.sendFramesToLink(link, frames)
 	}
-	// Also notify server-side subscribers
-	priority := a.Datagram.Protocol == core.ProtocolSidepathChat || a.Datagram.Protocol == core.ProtocolSidepathControl
-	for _, notifier := range notifiers {
-		n.notifyFrames(notifier, frames, priority)
+	// Also indicate to server-side subscribers (peers that connected TO us).
+	for _, cid := range subs {
+		n.notifyFrames(cid, frames)
 	}
 }
 
@@ -717,16 +615,13 @@ func (n *Node) announceLoop(ctx context.Context) {
 		for _, link := range n.peers {
 			links = append(links, link)
 		}
-		notifiers := make([]*serverNotifier, 0, len(n.notifiers))
-		for _, notifier := range n.notifiers {
-			notifiers = append(notifiers, notifier)
-		}
+		subs := n.subscriberIDsLocked()
 		n.mu.Unlock()
 		for _, link := range links {
 			n.sendFramesToLink(link, frames)
 		}
-		for _, notifier := range notifiers {
-			n.notifyFrames(notifier, frames, true)
+		for _, cid := range subs {
+			n.notifyFrames(cid, frames)
 		}
 		n.logf("announce sent epoch=%d seq=%d neighbors=%d", n.announceEpoch, seq-1, len(n.router.Neighbors.IDs()))
 	}
@@ -942,19 +837,15 @@ func (n *Node) transmitWithInfo(dg core.Datagram) (TransmitInfo, error) {
 	for _, link := range n.peers {
 		links = append(links, link)
 	}
-	notifiers := make([]*serverNotifier, 0, len(n.notifiers))
-	for _, notifier := range n.notifiers {
-		notifiers = append(notifiers, notifier)
-	}
+	subs := n.subscriberIDsLocked()
 	n.mu.Unlock()
 
 	for _, link := range links {
 		n.sendFramesToLink(link, frames)
 	}
-	// Also send to server-side subscribers (peers that connected TO us)
-	priority := dg.Protocol == core.ProtocolSidepathChat || dg.Protocol == core.ProtocolSidepathControl
-	for _, notifier := range notifiers {
-		n.notifyFrames(notifier, frames, priority)
+	// Also indicate to server-side subscribers (peers that connected TO us).
+	for _, cid := range subs {
+		n.notifyFrames(cid, frames)
 	}
 	return info, nil
 }
@@ -989,154 +880,41 @@ func (n *Node) sendFramesToPeer(frames []core.Frame, peer core.NodeID) bool {
 		if peerID != peer {
 			continue
 		}
-		notifier, ok := n.notifiers[addr]
-		if !ok {
+		if !n.subscribers[addr] {
 			continue
 		}
 		n.mu.Unlock()
-		n.notifyFrames(notifier, frames, true)
+		n.notifyFrames(addr, frames)
 		return true
 	}
 	n.mu.Unlock()
 	return false
 }
 
+// subscriberIDsLocked snapshots the subscribed central ids. Caller must hold n.mu.
+func (n *Node) subscriberIDsLocked() []string {
+	ids := make([]string, 0, len(n.subscribers))
+	for cid := range n.subscribers {
+		ids = append(ids, cid)
+	}
+	return ids
+}
+
+// sendFramesToLink writes frames to a connected peer (central role) via the helper. Multi-fragment
+// transmissions use reliable (acknowledged) writes so the receiver can always reassemble.
 func (n *Node) sendFramesToLink(link *MacPeerLink, frames []core.Frame) {
 	reliable := len(frames) > 1
-	for i, f := range frames {
-		var err error
-		if reliable {
-			err = link.sendFrameReliable(f.Encode())
-		} else {
-			err = link.sendFrame(f.Encode())
-		}
-		if err != nil {
-			n.logf("send frame error peer=%s fragment=%d/%d reliable=%v: %v", link.peerID, i+1, len(frames), reliable, err)
-		}
-		if reliable && i+1 < len(frames) {
-			time.Sleep(interFrameDelay)
-		}
+	for _, f := range frames {
+		link.helper.sendCentral(link.addr, f.Encode(), reliable)
 	}
 }
 
-func (n *Node) notifyFrames(notifier *serverNotifier, frames []core.Frame, priority bool) {
-	for i, f := range frames {
-		if !notifier.enqueue(f.Encode(), priority) {
-			n.logf("notify queue full addr=%s fragment=%d/%d", notifier.addr, i+1, len(frames))
-		}
-		if len(frames) > 1 && i+1 < len(frames) {
-			time.Sleep(interFrameDelay)
-		}
-	}
-}
-
-func (n *Node) newServerNotifier(addr string, notifier ble.Notifier) *serverNotifier {
-	sn := &serverNotifier{
-		addr:      addr,
-		notifier:  notifier,
-		queue:     make(chan []byte, 256),
-		priorityQ: make(chan []byte, 64),
-		done:      make(chan struct{}),
-	}
-	go n.runServerNotifier(sn)
-	return sn
-}
-
-func (n *Node) runServerNotifier(sn *serverNotifier) {
-	for {
-		frame, ok := sn.nextFrame()
-		if !ok {
-			return
-		}
-		retries := 0
-		delay := notifyRetryMinDelay
-		lastLog := time.Time{}
-		var lastErr error
-		for {
-			_, err := n.writeNotification(sn, frame)
-			if err == nil {
-				if retries >= notifyLogAfterRetries {
-					n.logf("notify recovered addr=%s after %d retries (last error: %v)", sn.addr, retries, lastErr)
-				}
-				break
-			}
-			retries++
-			lastErr = err
-			if retries >= notifyLogAfterRetries && (lastLog.IsZero() || time.Since(lastLog) >= notifyBackpressureLog) {
-				n.logf("notify backpressure addr=%s: %v; queued=%d priority=%d retry=%d next=%s", sn.addr, err, len(sn.queue), len(sn.priorityQ), retries, delay)
-				lastLog = time.Now()
-			}
-			select {
-			case <-sn.done:
-				return
-			case <-time.After(delay):
-				if delay < notifyRetryMaxDelay {
-					delay *= 2
-					if delay > notifyRetryMaxDelay {
-						delay = notifyRetryMaxDelay
-					}
-				}
-			}
-		}
-	}
-}
-
-func (s *serverNotifier) nextFrame() ([]byte, bool) {
-	select {
-	case frame := <-s.priorityQ:
-		return frame, true
-	default:
-	}
-	select {
-	case frame := <-s.priorityQ:
-		return frame, true
-	case frame := <-s.queue:
-		return frame, true
-	case <-s.done:
-		return nil, false
-	}
-}
-
-func (n *Node) writeNotification(sn *serverNotifier, frame []byte) (int, error) {
-	n.notifyMu.Lock()
-	defer n.notifyMu.Unlock()
-
-	if wait := time.Until(n.notifyNextAt); wait > 0 {
-		timer := time.NewTimer(wait)
-		select {
-		case <-sn.done:
-			timer.Stop()
-			return 0, context.Canceled
-		case <-timer.C:
-		}
-	}
-
-	written, err := sn.notifier.Write(frame)
-	n.notifyNextAt = time.Now().Add(notifyGlobalPace)
-	return written, err
-}
-
-func (s *serverNotifier) enqueue(frame []byte, priority bool) bool {
-	frame = append([]byte(nil), frame...)
-	queue := s.queue
-	if priority {
-		queue = s.priorityQ
-	}
-	select {
-	case <-s.done:
-		return false
-	case queue <- frame:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *serverNotifier) close() {
-	select {
-	case <-s.done:
-	default:
-		close(s.done)
+// notifyFrames pushes frames to a subscribed central (peripheral role) as PACKET_OUT indications.
+// The helper owns per-central ordering and CoreBluetooth flow control, so there is nothing to pace
+// or retry here.
+func (n *Node) notifyFrames(centralID string, frames []core.Frame) {
+	for _, f := range frames {
+		n.helper.sendPeripheral(centralID, f.Encode())
 	}
 }
 
@@ -1212,11 +990,6 @@ func LoadOrCreateIdentity() (*core.Identity, error) {
 func LoadIncrementEpoch() (uint64, error) {
 	path := filepath.Join(os.Getenv("HOME"), ".sidepath", "epoch")
 	return core.LoadIncrementEpoch(path)
-}
-
-func isCtxErr(err error) bool {
-	c := errors.Cause(err)
-	return c == context.DeadlineExceeded || c == context.Canceled
 }
 
 func nodeIDs(ids []core.NodeID) []string {

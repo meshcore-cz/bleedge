@@ -1,4 +1,4 @@
-.PHONY: build test test-go build-macos bot clean
+.PHONY: build test test-go build-macos build-macos-helper bot clean
 
 build:
 	cd android && ./gradlew :sidepath-protocol:build :sidepath-chat:build :sidepath-meshcore:assembleDebug :sidepath-networking:assembleDebug
@@ -12,7 +12,11 @@ clean:
 test-go:
 	go test ./core/
 
-build-macos:
+# Native CoreBluetooth helper (Swift). The Go node spawns bin/sidepath-macos-ble-helper at runtime.
+build-macos-helper:
+	swiftc -O macos-ble-helper/*.swift -o bin/sidepath-macos-ble-helper -framework CoreBluetooth -framework Foundation
+
+build-macos: build-macos-helper
 	go build -o bin/sidepath-macos ./cmd/sidepath-macos
 
 ESP32_ADMIN_PUBKEY ?=

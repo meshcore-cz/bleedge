@@ -308,7 +308,7 @@ static void sendFramesToConn(const std::vector<uint8_t>& dg, uint16_t conn) {
   mesh::fragment(dg.data(), dg.size(), FRAME_MTU, frames);
   g_txDatagrams++;
   for (const auto& f : frames) {
-    g_packetOut->notify(f.data(), f.size(), conn);
+    g_packetOut->indicate(f.data(), f.size(), conn);
     g_txFrames++;
   }
 }
@@ -326,7 +326,7 @@ static bool floodToPeers(const std::vector<uint8_t>& dg, uint16_t exclude) {
   for (uint16_t h : targets) {
     if (h == exclude) continue;
     for (const auto& f : frames) {
-      g_packetOut->notify(f.data(), f.size(), h);
+      g_packetOut->indicate(f.data(), f.size(), h);
       g_txFrames++;
       sent = true;
     }
@@ -525,7 +525,8 @@ void setup() {
       svc->createCharacteristic(PACKETIN_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pin->setCallbacks(new PacketInCallbacks());
 
-  g_packetOut = svc->createCharacteristic(PACKETOUT_UUID, NIMBLE_PROPERTY::NOTIFY);
+  // INDICATE (ATT-acknowledged) so peer→central delivery is reliable, matching the write direction.
+  g_packetOut = svc->createCharacteristic(PACKETOUT_UUID, NIMBLE_PROPERTY::INDICATE);
   svc->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();

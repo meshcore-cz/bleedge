@@ -442,11 +442,12 @@ class SidepathGattClient(
             gatt.disconnect()
             return
         }
+        // Subscribe for INDICATIONS (acknowledged) so PACKET_OUT delivery peer→us is reliable.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
         } else {
             @Suppress("DEPRECATION")
-            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            descriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
             @Suppress("DEPRECATION")
             gatt.writeDescriptor(descriptor)
         }

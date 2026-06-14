@@ -45,6 +45,9 @@ class SidepathGattServer(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gattServer: BluetoothGattServer? = null
     private val notifyDevices = CopyOnWriteArrayList<BluetoothDevice>()
+    // Every central currently connected to our server (subscribed or not), so we can force-disconnect
+    // them when the mesh stops — otherwise an idle GATT link survives and the peer never learns we left.
+    private val connectedDevices = CopyOnWriteArrayList<BluetoothDevice>()
     private val notifyLock = Any()
     private val notifyQueues = ConcurrentHashMap<String, ArrayDeque<ByteArray>>()
     private val notifyInFlight = ConcurrentHashMap<String, Boolean>()
@@ -71,10 +74,11 @@ class SidepathGattServer(
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
 
-        // PACKET_OUT — NOTIFY
+        // PACKET_OUT — INDICATE (ATT-acknowledged push, so peer→us delivery is reliable like our
+        // Write Requests in the other direction).
         val packetOutC = BluetoothGattCharacteristic(
             SidepathUUIDs.PACKET_OUT,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
         // Add CCCD descriptor required for notifications
@@ -143,14 +147,16 @@ class SidepathGattServer(
         }
     }
 
+    // confirm=true → send an ATT indication; onNotificationSent then fires when the central confirms
+    // receipt (not merely when the buffer drains), which is what makes the push reliable.
     @Suppress("DEPRECATION")
     private fun sendNotify(server: BluetoothGattServer, device: BluetoothDevice, frame: ByteArray): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val status = server.notifyCharacteristicChanged(device, packetOutChar, false, frame)
+            val status = server.notifyCharacteristicChanged(device, packetOutChar, true, frame)
             status == BluetoothStatusCodes.SUCCESS
         } else {
             packetOutChar.value = frame
-            server.notifyCharacteristicChanged(device, packetOutChar, false)
+            server.notifyCharacteristicChanged(device, packetOutChar, true)
         }
 
     private fun markDeviceUnreachable(device: BluetoothDevice, reason: String) {
@@ -184,9 +190,29 @@ class SidepathGattServer(
 
     private fun deviceKey(device: BluetoothDevice): String = device.address
 
+    /**
+     * Force-disconnects every central connected to our server. Called when the mesh stops so peers
+     * promptly see us go away instead of holding a stale, idle GATT link. The server object stays
+     * usable (re-advertising re-accepts connections).
+     */
+    fun disconnectAll() {
+        val server = gattServer ?: return
+        for (device in connectedDevices) {
+            server.cancelConnection(device)
+        }
+        connectedDevices.clear()
+        notifyDevices.clear()
+        synchronized(notifyLock) {
+            notifyQueues.clear()
+            notifyInFlight.clear()
+            notifyFailures.clear()
+        }
+    }
+
     fun close() {
         gattServer?.close()
         gattServer = null
+        connectedDevices.clear()
         notifyDevices.clear()
         synchronized(notifyLock) {
             notifyQueues.clear()
@@ -212,9 +238,11 @@ class SidepathGattServer(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "Device connected: ${device.address}")
+                if (!connectedDevices.contains(device)) connectedDevices.add(device)
                 onDeviceConnected?.invoke(device)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "Device disconnected: ${device.address}")
+                connectedDevices.remove(device)
                 notifyDevices.remove(device)
                 clearNotifyState(device)
                 onDeviceDisconnected?.invoke(device)

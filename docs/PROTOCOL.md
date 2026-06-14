@@ -96,10 +96,15 @@ deterministic fallback name or the NodeID.
 | Service      | `9b7e6a10-7d91-4c19-a3b8-6e2a11f3a001` | Primary                        |
 | `NODE_INFO`  | `9b7e6a10-7d91-4c19-a3b8-6e2a11f3a002` | Read                           |
 | `PACKET_IN`  | `9b7e6a10-7d91-4c19-a3b8-6e2a11f3a003` | Write / Write Without Response |
-| `PACKET_OUT` | `9b7e6a10-7d91-4c19-a3b8-6e2a11f3a004` | Notify                         |
+| `PACKET_OUT` | `9b7e6a10-7d91-4c19-a3b8-6e2a11f3a004` | Indicate                       |
 
 A client writes frames to `PACKET_IN`. A server emits frames through
 `PACKET_OUT`. Both directions use the same frame format.
+
+`PACKET_OUT` MUST use ATT **indications** (acknowledged), not notifications, so that
+server→client delivery is as reliable as the client→server Write Request. A client MUST
+subscribe to `PACKET_OUT` for indications (CCCD `0x0002`); a server MUST send each frame as an
+indication and await its confirmation before sending the next to that client.
 
 ### 4.2 `NODE_INFO`
 

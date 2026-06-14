@@ -541,7 +541,9 @@ class SidepathService : Service() {
             onFrameReceived = { frame, device -> handleIncomingFrame(frame, device) },
             onDeviceConnected = { device ->
                 val addrHex = device.address.replace(":", "")
-                serverPeers[addrHex] = null
+                // Register the device so we can push to it; the NodeID is filled in by learnNeighbor
+                // once we receive a frame. (serverPeers is a ConcurrentHashMap and cannot hold null,
+                // so we must NOT pre-seed a null placeholder — it throws and aborts this callback.)
                 serverPeerDevices[addrHex] = device
                 log("device connected addr=${device.address}", LogTag.SERVER)
             },
@@ -1600,6 +1602,9 @@ class SidepathService : Service() {
         bleAdvertiser?.stopAdvertising()
         bleScanner?.stopScan()
         peers.values.forEach { it.disconnect() }
+        // Tear down inbound GATT-server connections too, or they survive as idle links and the
+        // connected centrals keep showing us as a live peer for minutes after we've stopped.
+        bleGattServer?.disconnectAll()
         peers.clear(); serverPeers.clear(); serverPeerDevices.clear()
         _connectedPeers.value = emptyList()
         _advertisingActive.value = false; _scanningActive.value = false

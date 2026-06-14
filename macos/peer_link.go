@@ -4,15 +4,14 @@ package macos
 
 import (
 	"github.com/meshcore-cz/sidepath-protocol/core"
-	"github.com/go-ble/ble"
 )
 
-// MacPeerLink implements core.PeerLink for a go-ble Client connection.
+// MacPeerLink implements core.PeerLink for an outgoing connection owned by the BLE helper. Frames
+// are sent by writing the peer's PACKET_IN characteristic via a helper command keyed by [addr].
 type MacPeerLink struct {
 	peerID core.NodeID
 	addr   string
-	cln    ble.Client
-	piChar *ble.Characteristic
+	helper *bleHelper
 	mtu    int
 	txPHY  core.PHY
 	rxPHY  core.PHY
@@ -26,14 +25,16 @@ func (l *MacPeerLink) RSSI() int           { return l.rssi }
 
 // sendFrame writes a raw GATT frame to PACKET_IN (write without response).
 func (l *MacPeerLink) sendFrame(frame []byte) error {
-	return l.cln.WriteCharacteristic(l.piChar, frame, true /* noRsp */)
+	l.helper.sendCentral(l.addr, frame, false)
+	return nil
 }
 
 func (l *MacPeerLink) sendFrameReliable(frame []byte) error {
-	return l.cln.WriteCharacteristic(l.piChar, frame, false /* with response */)
+	l.helper.sendCentral(l.addr, frame, true)
+	return nil
 }
 
-// SendFrame implements core.PeerLink — fragments the payload and sends each frame.
+// SendFrame implements core.PeerLink.
 func (l *MacPeerLink) SendFrame(frame []byte) error {
 	return l.sendFrame(frame)
 }
