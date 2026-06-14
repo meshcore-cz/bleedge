@@ -11,6 +11,12 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
+sourceSets {
+    main {
+        resources.srcDir("${rootDir}/../res")
+    }
+}
+
 dependencies {
     // CBOR datagram/control encoding (cross-language wire compatibility).
     api "com.upokecenter:cbor:4.5.4"
