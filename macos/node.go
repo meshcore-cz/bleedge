@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -46,6 +47,9 @@ type Node struct {
 	subscribers map[string]bool
 	// server-side peer central_id → learned NodeID
 	serverPeerIDs map[string]core.NodeID
+	// scan addr → NodeID learned from its NODE_INFO, so onScan can dedup an already-connected peer
+	// by identity even though the advertisement carries only an address
+	addrNode map[string]core.NodeID
 
 	// joined channels keyed by lowercase PSK hex (see channels.go)
 	channels map[string]*Channel
@@ -54,6 +58,12 @@ type Node struct {
 	onMessage        func(core.Datagram)
 	onPeerConnect    func(core.NodeID)
 	onPeerDisconnect func(core.NodeID)
+	onTrace          func(core.TraceResponseBody, time.Duration)
+
+	// traceStarts records the send time of each trace we originated, keyed by tag, so a response
+	// can be matched back to compute round-trip time. Guarded by traceMu.
+	traceMu     sync.Mutex
+	traceStarts map[uint32]time.Time
 }
 
 type TransmitInfo struct {
@@ -64,11 +74,11 @@ type TransmitInfo struct {
 
 // Config holds startup parameters.
 type Config struct {
-	Identity         *core.Identity
-	Name             string // primary display label; empty = deterministic default from pubkey
-	Platform         string // OS/device string; empty = core.PlatformDescription()
-	Description      string // free-form bio for ANNOUNCE/NODE_INFO; default empty
-	Caps             core.Capabilities
+	Identity    *core.Identity
+	Name        string // primary display label; empty = deterministic default from pubkey
+	Platform    string // OS/device string; empty = core.PlatformDescription()
+	Description string // free-form bio for ANNOUNCE/NODE_INFO; default empty
+	Caps        core.Capabilities
 	// Bridges lists the external networks this gateway bridges, advertised in the v2 ANNOUNCE
 	// `bridges` section (§8.3). Non-empty makes the node emit v2 announces; empty keeps it on v1.
 	Bridges          []core.BridgeAd
@@ -79,6 +89,9 @@ type Config struct {
 	OnMessage        func(dg core.Datagram) // called for locally delivered application datagrams
 	OnPeerConnect    func(id core.NodeID)   // called when outgoing peer connects
 	OnPeerDisconnect func(id core.NodeID)   // called when peer disconnects
+	// OnTrace is called when a response arrives for a trace this node originated, with the round-trip
+	// time measured from SendTrace. Responses with no matching pending request are ignored.
+	OnTrace func(resp core.TraceResponseBody, rtt time.Duration)
 }
 
 // New creates a Node. Call Run to start it.
@@ -114,7 +127,9 @@ func New(cfg Config) *Node {
 		connecting:    make(map[string]bool),
 		subscribers:   make(map[string]bool),
 		serverPeerIDs: make(map[string]core.NodeID),
+		addrNode:      make(map[string]core.NodeID),
 		channels:      make(map[string]*Channel),
+		traceStarts:   make(map[uint32]time.Time),
 		logFn:         cfg.LogFn,
 	}
 	if n.announceEpoch == 0 {
@@ -127,6 +142,7 @@ func New(cfg Config) *Node {
 	n.onMessage = cfg.OnMessage
 	n.onPeerConnect = cfg.OnPeerConnect
 	n.onPeerDisconnect = cfg.OnPeerDisconnect
+	n.onTrace = cfg.OnTrace
 	for _, id := range cfg.Allowlist {
 		n.allowlist[id] = true
 		n.router.Allowlist[id] = true
@@ -180,7 +196,7 @@ func (n *Node) onHelperEvent(header map[string]any, payload []byte) {
 		n.mu.Unlock()
 		n.logf("connect %s failed: %s", addr, asString(header["error"]))
 	case "peer_disconnected":
-		n.onPeerDisconnected(asString(header["addr"]))
+		n.onPeerDisconnected(asString(header["addr"]), asString(header["reason"]))
 	case "central_frame":
 		n.handleIncomingFrameForAddr(asString(header["addr"]), payload)
 	case "subscribed":
@@ -203,10 +219,34 @@ func (n *Node) onScan(addr string, rssi int) {
 		n.mu.Unlock()
 		return
 	}
+	// Dedup by NodeID, not just address: if we already learned which node lives at this address
+	// (from a prior NODE_INFO read) and we already hold a link to it in either direction, don't
+	// re-dial. Otherwise we'd reconnect every scan and the collapse rule would drop it again — a
+	// busy loop against an already-connected peer.
+	if id, ok := n.addrNode[addr]; ok && n.haveLinkToNodeLocked(id) {
+		n.mu.Unlock()
+		return
+	}
 	n.connecting[addr] = true
 	n.mu.Unlock()
 	n.logf("scan found addr=%s rssi=%d", addr, rssi)
 	n.helper.connect(addr)
+}
+
+// haveLinkToNodeLocked reports whether we already have a link to [id] in either direction. Caller
+// must hold n.mu.
+func (n *Node) haveLinkToNodeLocked(id core.NodeID) bool {
+	for _, l := range n.peers {
+		if l.peerID == id {
+			return true
+		}
+	}
+	for _, pid := range n.serverPeerIDs {
+		if pid == id {
+			return true
+		}
+	}
+	return false
 }
 
 // onPeerConnected finalizes an outgoing connection the helper completed (connect + discover +
@@ -238,6 +278,9 @@ func (n *Node) onPeerConnected(addr string, mtu int, nodeInfo []byte) {
 		return
 	}
 	n.mu.Lock()
+	// Remember which node lives at this address so onScan can dedup it later without re-dialing,
+	// even on the collapse/duplicate paths below that don't keep the link.
+	n.addrNode[addr] = peerID
 	dup := false
 	for a, l := range n.peers {
 		if l.peerID == peerID && a != addr {
@@ -251,13 +294,30 @@ func (n *Node) onPeerConnected(addr string, mtu int, nodeInfo []byte) {
 		cleanup()
 		return
 	}
+	// §4.4 collapse: if this node already dialed our GATT server (we hold an inbound link from it)
+	// and our NodeID is the larger, drop this outbound and keep the inbound — exactly one of the two
+	// nodes does this, leaving a single link instead of a redundant mutual pair.
+	haveInbound := false
+	for _, id := range n.serverPeerIDs {
+		if id == peerID {
+			haveInbound = true
+			break
+		}
+	}
+	if haveInbound && bytes.Compare(n.nodeID[:], peerID[:]) >= 0 {
+		n.mu.Unlock()
+		n.logf("peer node_id=%s inbound link exists and we are larger — keeping inbound, dropping outbound addr=%s", peerID, addr)
+		cleanup()
+		return
+	}
 	link := &MacPeerLink{
-		peerID: peerID,
-		addr:   addr,
-		helper: n.helper,
-		mtu:    mtu,
-		txPHY:  core.PHY1M,
-		rxPHY:  core.PHY1M,
+		peerID:      peerID,
+		addr:        addr,
+		helper:      n.helper,
+		mtu:         mtu,
+		txPHY:       core.PHY1M,
+		rxPHY:       core.PHY1M,
+		connectedAt: time.Now(),
 	}
 	n.peers[addr] = link
 	delete(n.connecting, addr)
@@ -273,17 +333,33 @@ func (n *Node) onPeerConnected(addr string, mtu int, nodeInfo []byte) {
 	n.requestAnnounce()
 }
 
-// onPeerDisconnected handles a dropped outgoing connection.
-func (n *Node) onPeerDisconnected(addr string) {
+// onPeerDisconnected handles a dropped outgoing connection. [reason] is the BLE disconnect reason
+// reported by the helper ("clean" for a local close).
+func (n *Node) onPeerDisconnected(addr, reason string) {
 	n.mu.Lock()
 	link := n.peers[addr]
 	delete(n.peers, addr)
 	delete(n.connecting, addr)
+	// Is the node still reachable by another link (its inbound connection to our GATT server, or a
+	// second outbound)? The collapse rule deliberately drops a redundant outbound while keeping the
+	// inbound, so a dropped link here does not necessarily mean the peer is gone.
+	stillLinked := link != nil && n.haveLinkToNodeLocked(link.peerID)
 	n.mu.Unlock()
 	if link == nil {
 		return
 	}
-	n.logf("disconnected peer=%s", link.peerID)
+	if reason == "" {
+		reason = "unknown"
+	}
+	dur := time.Since(link.connectedAt).Round(time.Millisecond)
+	if stillLinked {
+		// Redundant link closed (typically a §4.4 collapse) — the peer is still connected the other
+		// way, so keep the neighbor and don't signal a disconnect to the app/UI.
+		n.logf("dropped redundant link to peer=%s after=%s reason=%q (still connected via another link) addr=%s",
+			link.peerID, dur, reason, addr)
+		return
+	}
+	n.logf("disconnected peer=%s after=%s reason=%q addr=%s", link.peerID, dur, reason, addr)
 	n.router.Neighbors.Remove(link.peerID)
 	if n.onPeerDisconnect != nil {
 		n.onPeerDisconnect(link.peerID)
@@ -383,11 +459,27 @@ func (n *Node) learnNeighbor(dg core.Datagram, fromAddr string) {
 		return
 	}
 	if fromAddr != "" {
+		var dropOutbound string
 		n.mu.Lock()
 		if n.subscribers[fromAddr] {
 			n.serverPeerIDs[fromAddr] = nb
+			// §4.4 collapse from the inbound side: this node has now dialed our GATT server. If we
+			// also hold an outbound link to it and our NodeID is the larger, drop the outbound and
+			// keep this inbound (covers the inbound arriving after the outbound was established).
+			if bytes.Compare(n.nodeID[:], nb[:]) >= 0 {
+				for a, link := range n.peers {
+					if link.peerID == nb {
+						dropOutbound = a
+						break
+					}
+				}
+			}
 		}
 		n.mu.Unlock()
+		if dropOutbound != "" {
+			n.logf("peer node_id=%s now inbound and we are larger — dropping redundant outbound addr=%s", nb, dropOutbound)
+			n.helper.disconnect(dropOutbound)
+		}
 	}
 	if _, ok := n.router.Neighbors.Get(nb); ok {
 		n.router.Neighbors.Touch(nb)
@@ -490,6 +582,8 @@ func (n *Node) deliverLocal(dg core.Datagram) {
 				if err := n.returnTrace(dg, ctrl.Body); err != nil {
 					n.logf("trace response error: %v", err)
 				}
+			case core.ControlTraceResponse:
+				n.handleTraceResponse(ctrl.Body)
 			}
 		}
 		return
@@ -810,7 +904,45 @@ func (n *Node) SendTrace(dst core.NodeID, route []core.NodeID) (uint32, error) {
 	}
 	dg := core.Datagram{Version: core.DatagramVersion, ID: core.NewDatagramID(), Source: n.nodeID, Destination: dst, TTL: uint8(len(route)), Route: route, Protocol: core.ProtocolSidepathControl, Payload: payload}
 	n.router.MarkOriginated(dg.ID)
-	return tag, n.transmitToRoute(dg)
+	// Record the send time before transmitting so handleTraceResponse can compute round-trip time
+	// even for a near-instant reply; drop it again if the send fails.
+	n.traceMu.Lock()
+	n.traceStarts[tag] = time.Now()
+	n.traceMu.Unlock()
+	if err := n.transmitToRoute(dg); err != nil {
+		n.traceMu.Lock()
+		delete(n.traceStarts, tag)
+		n.traceMu.Unlock()
+		return 0, err
+	}
+	return tag, nil
+}
+
+// handleTraceResponse processes a response to a trace this node originated: it matches the response
+// tag to the pending request to compute round-trip time, logs the result, and notifies any
+// registered OnTrace callback. Responses whose tag has no pending request (already completed, or
+// never sent by us) are logged and dropped. Runs on the inbound BLE callback goroutine.
+func (n *Node) handleTraceResponse(body []byte) {
+	var resp core.TraceResponseBody
+	if err := cbor.Unmarshal(body, &resp); err != nil {
+		n.logf("trace response decode error: %v", err)
+		return
+	}
+	n.traceMu.Lock()
+	start, ok := n.traceStarts[resp.Tag]
+	if ok {
+		delete(n.traceStarts, resp.Tag)
+	}
+	n.traceMu.Unlock()
+	if !ok {
+		n.logf("trace response tag=0x%08x ignored (no matching request)", resp.Tag)
+		return
+	}
+	rtt := time.Since(start)
+	n.logf("trace response tag=0x%08x received fwd-path=%v rtt=%s", resp.Tag, nodeIDs(resp.ForwardPath), rtt)
+	if n.onTrace != nil {
+		n.onTrace(resp, rtt)
+	}
 }
 
 // PublicKeyFor returns a node's 32-byte Ed25519 public key from the topology, or nil.
@@ -937,6 +1069,37 @@ func (n *Node) ConnectedPeers() []core.NodeID {
 		ids = append(ids, link.peerID)
 	}
 	return ids
+}
+
+// PeerInfo is a connected peer and the direction(s) of its BLE link(s).
+type PeerInfo struct {
+	ID        core.NodeID
+	Direction string // "outbound", "inbound", or "in+out"
+}
+
+// PeerLinks returns every connected peer — outbound (we dialed them) and inbound (they dialed our
+// GATT server) — tagged with direction and sorted by NodeID. After §4.4 collapse a peer is usually
+// reachable in only one direction, so the `peers` command must show both kinds to be complete.
+func (n *Node) PeerLinks() []PeerInfo {
+	n.mu.Lock()
+	dir := make(map[core.NodeID]string)
+	for _, link := range n.peers {
+		dir[link.peerID] = "outbound"
+	}
+	for _, id := range n.serverPeerIDs {
+		if dir[id] == "outbound" {
+			dir[id] = "in+out"
+		} else {
+			dir[id] = "inbound"
+		}
+	}
+	n.mu.Unlock()
+	out := make([]PeerInfo, 0, len(dir))
+	for id, d := range dir {
+		out = append(out, PeerInfo{ID: id, Direction: d})
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0 })
+	return out
 }
 
 // NodeID returns this node's ID.

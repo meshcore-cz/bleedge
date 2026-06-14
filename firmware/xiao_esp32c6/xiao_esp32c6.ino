@@ -1,7 +1,12 @@
 // Sidepath v3 relay firmware for Seeed Studio XIAO ESP32-C6.
 //
-// Peripheral/server relay: phones and nodes connect to this board, write v2
-// GATT frames to PACKET_IN, and receive relayed frames from PACKET_OUT.
+// Dual-role node (PROTOCOL.md §4.0): runs the GATT server *and* a BLE central at
+// the same time. As a peripheral, phones and nodes connect in and exchange v2
+// frames over PACKET_IN/PACKET_OUT. As a central, the board scans for other
+// Sidepath nodes, connects out, subscribes to their PACKET_OUT, and writes to
+// their PACKET_IN — so two relays (or any two peripheral-leaning peers) link
+// directly instead of needing a third node to bridge them. The central role
+// lives in ble_central.h; both roles feed the same relay engine (onDatagram).
 
 #include <NimBLEDevice.h>
 #include <Preferences.h>
@@ -50,6 +55,10 @@ static mesh::Reassembler g_reassembler;
 static std::mutex g_peersMu;
 static std::vector<uint16_t> g_peers;
 static std::map<uint16_t, std::array<uint8_t, mesh::NODE_ID_LEN>> g_connNode;
+// For peers WE dialed (central role), the conn handle maps to the peer's remote
+// PACKET_IN characteristic we write to. Inbound (server) peers are not in this
+// map and are reached via g_packetOut->indicate(). Both kinds live in g_peers.
+static std::map<uint16_t, NimBLERemoteCharacteristic*> g_clientPacketIn;
 
 static uint32_t g_announceSeq = 0;
 static uint32_t g_lastAnnounceMs = 0;
@@ -72,6 +81,13 @@ static bool handleRemoteAdminChat(const std::vector<uint8_t>& dg, const mesh::Da
 static void loadAdmins();
 static bool handleAdminCommandExtra(const String& cmd, String& reply);
 static String adminCommandHelp();
+
+// BLE central role (ble_central.h). startCentral() begins scanning; centralTick()
+// drives the connect queue from loop(); maybeCollapseDuplicate() resolves a
+// mutual inbound+outbound link to the same NodeID per PROTOCOL.md §4.4.
+static void startCentral();
+static void centralTick();
+static void maybeCollapseDuplicate(uint16_t conn);
 
 static inline void ledSet(bool on) {
   digitalWrite(LED_PIN, (LED_ACTIVE_LOW ? !on : on) ? HIGH : LOW);
@@ -303,12 +319,31 @@ static void loadOrCreateIdentityAndEpoch() {
   memcpy(g_nodeId, g_pubKey, mesh::NODE_ID_LEN);
 }
 
+// Sends one frame to a single peer, picking the transport for its role: an
+// outbound (central) peer receives a write to its PACKET_IN; an inbound (server)
+// peer receives an indication on our PACKET_OUT.
+static void sendFrameRaw(const uint8_t* data, size_t len, uint16_t conn) {
+  NimBLERemoteCharacteristic* remoteIn = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_peersMu);
+    auto it = g_clientPacketIn.find(conn);
+    if (it != g_clientPacketIn.end()) remoteIn = it->second;
+  }
+  if (remoteIn) {
+    // Write-without-response: PACKET_IN advertises WRITE_NR and an acknowledged
+    // write would block the NimBLE host task we are already running on.
+    remoteIn->writeValue(data, len, false);
+  } else {
+    g_packetOut->indicate(data, len, conn);
+  }
+}
+
 static void sendFramesToConn(const std::vector<uint8_t>& dg, uint16_t conn) {
   std::vector<std::vector<uint8_t>> frames;
   mesh::fragment(dg.data(), dg.size(), FRAME_MTU, frames);
   g_txDatagrams++;
   for (const auto& f : frames) {
-    g_packetOut->indicate(f.data(), f.size(), conn);
+    sendFrameRaw(f.data(), f.size(), conn);
     g_txFrames++;
   }
 }
@@ -326,7 +361,7 @@ static bool floodToPeers(const std::vector<uint8_t>& dg, uint16_t exclude) {
   for (uint16_t h : targets) {
     if (h == exclude) continue;
     for (const auto& f : frames) {
-      g_packetOut->indicate(f.data(), f.size(), h);
+      sendFrameRaw(f.data(), f.size(), h);
       g_txFrames++;
       sent = true;
     }
@@ -363,8 +398,43 @@ static void learnNeighbor(const mesh::DatagramHeader& h, uint16_t sender) {
   if (memcmp(nb, g_nodeId, mesh::NODE_ID_LEN) == 0) return;
   std::array<uint8_t, mesh::NODE_ID_LEN> id;
   memcpy(id.data(), nb, mesh::NODE_ID_LEN);
-  std::lock_guard<std::mutex> lk(g_peersMu);
-  g_connNode[sender] = id;
+  {
+    std::lock_guard<std::mutex> lk(g_peersMu);
+    g_connNode[sender] = id;
+  }
+  // Now that this connection has a NodeID, a mutual inbound+outbound link to the
+  // same peer may exist; collapse it deterministically (§4.4).
+  maybeCollapseDuplicate(sender);
+}
+
+// Builds and sends a TRACE_RESPONSE for a trace request addressed to us, routed back along the
+// reverse of the request's path to the directly-connected hop that delivered it.
+static void answerTrace(const std::vector<uint8_t>& dg, const mesh::DatagramHeader& h) {
+  uint8_t id[mesh::DATAGRAM_ID_LEN];
+  esp_fill_random(id, sizeof(id));
+  std::vector<uint8_t> resp;
+  uint32_t tag = 0;
+  if (!mesh::buildTraceResponse(h, dg.data(), dg.size(), g_nodeId, id, resp, tag)) {
+    Serial.println("[relay] trace: response build failed");
+    return;
+  }
+  g_dedup.seenOrAdd(id);  // we originated it — ignore any echo
+  uint8_t firstHop[mesh::NODE_ID_LEN];
+  if (!mesh::directNeighbor(h, firstHop) || !sendToNode(resp, firstHop)) {
+    Serial.printf("[relay] trace tag=0x%08x: reply hop not connected\n", tag);
+    return;
+  }
+  pulseRelayLed();
+  Serial.printf("[relay] trace tag=0x%08x replied\n", tag);
+}
+
+// If this locally-delivered datagram is a trace request, answer it and return true.
+static bool maybeAnswerTrace(const std::vector<uint8_t>& dg, const mesh::DatagramHeader& h) {
+  if (h.protocol != mesh::PROTO_SIDEPATH_CONTROL || h.controlKind != mesh::CONTROL_TRACE_REQUEST) {
+    return false;
+  }
+  answerTrace(dg, h);
+  return true;
 }
 
 static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
@@ -391,7 +461,10 @@ static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
   bool addressedHere = h.hasDestination && memcmp(h.destination, g_nodeId, mesh::NODE_ID_LEN) == 0;
   if (!h.sourceRouted) {
     if (h.ttl <= 1) return;
-    if (addressedHere && !isBroadcast(h.destination)) return;
+    if (addressedHere && !isBroadcast(h.destination)) {
+      maybeAnswerTrace(dg, h);
+      return;
+    }
     std::vector<uint8_t> fwd;
     if (!mesh::buildFloodForward(dg.data(), dg.size(), g_nodeId, h.ttl - 1, fwd)) {
       Serial.println("[relay] drop: flood forward build failed");
@@ -411,7 +484,9 @@ static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
     return;
   }
   if (h.routeEndsHere || !h.hasNextHop) {
-    Serial.println("[relay] source-route delivered locally (no app handler)");
+    if (!maybeAnswerTrace(dg, h)) {
+      Serial.println("[relay] source-route delivered locally (no app handler)");
+    }
     return;
   }
   std::vector<uint8_t> fwd;
@@ -426,6 +501,8 @@ static void onDatagram(const std::vector<uint8_t>& dg, uint16_t sender) {
   g_sourceRelays++;
   pulseRelayLed();
 }
+
+#include "ble_central.h"
 
 static void sendAnnounce() {
   uint8_t id[mesh::DATAGRAM_ID_LEN];
@@ -545,11 +622,14 @@ void setup() {
   adv->setScanResponseData(scanData);
   adv->start();
   Serial.println("[relay] advertising started");
+
+  startCentral();
 }
 
 void loop() {
   uint32_t now = millis();
   processSerialAdmin();
+  centralTick();
   if (now - g_lastAnnounceMs >= ANNOUNCE_INTERVAL_MS) {
     g_lastAnnounceMs = now;
     sendAnnounce();

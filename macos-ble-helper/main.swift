@@ -222,7 +222,9 @@ final class Helper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDeleg
         piChars.removeValue(forKey: addr)
         poChars.removeValue(forKey: addr)
         niChars.removeValue(forKey: addr)
-        io.send(["type": "peer_disconnected", "addr": addr])
+        // error is nil for a clean local disconnect; otherwise it carries the BLE reason
+        // (supervision timeout, peer-initiated close, etc.) — forward it so the node can log why.
+        io.send(["type": "peer_disconnected", "addr": addr, "reason": error?.localizedDescription ?? "clean"])
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {

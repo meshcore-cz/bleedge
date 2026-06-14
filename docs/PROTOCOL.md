@@ -89,6 +89,24 @@ deterministic fallback name or the NodeID.
 
 ## 4. BLE layer
 
+### 4.0 Node roles
+
+Every Sidepath node MUST implement **both** BLE roles simultaneously:
+
+* **Central** — scan for peers (§4.3), connect to discovered nodes (§4.4), and
+  subscribe to each connected peer's `PACKET_OUT` for indications (§4.1).
+* **Peripheral** — advertise (§4.3) and expose the GATT service (§4.1) so other
+  nodes may connect inbound.
+
+A node MUST NOT operate as peripheral-only or central-only. Single-role nodes
+still speak the GATT layer but break the mesh's connectivity assumptions: two
+peripheral-only nodes can never link to each other, and a peripheral-only node
+can never initiate a connection to a peer it discovers — it can only ever be
+connected *to*. The connection-collapse rule (§4.4) likewise assumes every node
+can hold both an inbound and an outbound link. An implementation on hardware that
+genuinely cannot act as a central is non-conforming and MUST document the
+limitation explicitly.
+
 ### 4.1 GATT service and characteristics
 
 | Name         | UUID                                   | Properties                     |
@@ -148,11 +166,36 @@ Coded-PHY discovery on some devices.
 
 ### 4.4 Connection rule
 
-Whoever discovers a peer MAY connect.
+Whoever discovers a peer MAY connect. Because every node is dual-role (§4.0),
+either side of a pair may be the one that discovers and connects; the mesh does
+not rely on a fixed central/peripheral assignment between any two nodes.
 
-Mutual duplicate connections are collapsed deterministically. For a pair of
-NodeIDs, the node with the larger NodeID drops its outgoing link and keeps the
-incoming link. Peer links are deduplicated by NodeID.
+**Dedup before dialing.** A node MUST NOT open an outgoing connection to a peer it
+already has a link to in either direction. Match on NodeID, not BLE address —
+peers rotate their address for privacy, so the same node reappears under new
+addresses. The advertised NodeID (§4.3) is the primary key, but it is not always
+present: coded-PHY peers carry it only in the scan response, which a scan may not
+capture. An implementation SHOULD therefore remember the NodeID it read from a
+peer's `NODE_INFO`, keyed by BLE address, and use it to dedup when an advertisement
+omits the NodeID — otherwise it repeatedly dials an already-connected peer, reads
+`NODE_INFO`, finds the duplicate and drops it, and each short-lived connection
+appears as a flapping inbound link on the other side.
+
+**Collapse rule.** When both nodes of a pair connect to each other, the redundant
+pair MUST be collapsed to a single link, deterministically. Compare the two 10-byte
+NodeIDs as **unsigned** byte strings (lexicographic, most-significant byte first):
+the node with the larger NodeID drops its *outgoing* link and keeps the *incoming*
+one; the node with the smaller NodeID keeps its outgoing link. The smaller node need
+not drop its incoming link — it goes away when the larger node drops its outgoing
+one. Both nodes MUST use the same unsigned comparison so they agree on which is
+larger; a signed byte comparison disagrees whenever a NodeID's leading byte has its
+high bit set, leaving the pair either doubly connected or fully disconnected (a
+reconnect loop).
+
+The collapse is a continuous invariant, not a one-time check at connect time: a node
+MUST evaluate it whenever a link's peer NodeID becomes known — both when an outgoing
+connection finishes its `NODE_INFO` read while an incoming link already exists, and
+when an incoming link's NodeID is learned while an outgoing link already exists.
 
 ### 4.5 PHY modes
 
@@ -958,8 +1001,19 @@ A conforming implementation MUST:
 
 * [ ] derive an Ed25519 identity from a persisted 32-byte seed;
 * [ ] derive the 10-byte NodeID as `public_key[0:10]`;
+* [ ] implement both BLE roles — central and peripheral — simultaneously (§4.0);
 * [ ] advertise the service UUID and, where supported, `0xBEED` manufacturer data;
 * [ ] expose `NODE_INFO`, `PACKET_IN`, and `PACKET_OUT` with the specified UUIDs;
+* [ ] scan for and connect to peers advertising the service UUID or `0xBEED`
+  manufacturer data, and subscribe to each peer's `PACKET_OUT` for indications
+  (CCCD `0x0002`);
+* [ ] send `PACKET_OUT` as ATT indications, awaiting each confirmation before the
+  next frame to that peer;
+* [ ] dedup outgoing connections by NodeID rather than BLE address, including peers
+  whose advertisement omits the NodeID (learn it from `NODE_INFO`) (§4.4);
+* [ ] collapse mutual connections using an unsigned NodeID comparison — the larger
+  NodeID drops its outgoing link — re-evaluated whenever a link's peer NodeID
+  becomes known (§4.4);
 * [ ] encode `NODE_INFO` as `version | public_key | provisional_caps`;
 * [ ] encode frame version `2` with a hop-local `transfer_id`;
 * [ ] key reassembly by `(peer_link, transfer_id)`;

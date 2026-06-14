@@ -636,14 +636,14 @@ func isHexLen(s string, n int) bool {
 }
 
 func (m tuiModel) renderPeers() []string {
-	peers := m.node.ConnectedPeers()
+	peers := m.node.PeerLinks()
 	if len(peers) == 0 {
 		return []string{"(no peers connected)"}
 	}
 	out := make([]string, 0, len(peers))
 	for _, p := range peers {
-		out = append(out, fmt.Sprintf("peer: %s  %s%s  %s",
-			p, nameLabel(m.node.NameFor(p)), platLabel(m.node.PlatformFor(p)), descLabel(m.node.DescriptionFor(p))))
+		out = append(out, fmt.Sprintf("peer: %s  %s%s  [%s] %s",
+			p.ID, nameLabel(m.node.NameFor(p.ID)), platLabel(m.node.PlatformFor(p.ID)), p.Direction, descLabel(m.node.DescriptionFor(p.ID))))
 	}
 	return out
 }

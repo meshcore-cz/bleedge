@@ -316,6 +316,15 @@ class SidepathService : Service() {
     private val connectingPeers = ConcurrentHashMap<String, Long>()
     private val reconnectAfterMs = ConcurrentHashMap<String, Long>()
     private val connectionFailures = ConcurrentHashMap<String, Int>()
+    // addrHex → the NodeID last seen at that BLE address, learned when we read a peer's NODE_INFO.
+    // Coded-PHY peers carry their NodeID only in the scan response (Advertiser.startExtendedAdvertising),
+    // which a scan does not always capture, so advertisedNodeId is often null for them. Without a node
+    // to dedup on, we re-dial an already-connected peer, read NODE_INFO, find the duplicate and drop it
+    // — once per advert. This lets the eligibility check dedup by the learned NodeID instead, so we stop
+    // re-dialing. Access only under connectionLock; bounded, evicting the least-recently-used entry.
+    private val knownAddrNode = object : LinkedHashMap<String, NodeId>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, NodeId>?) = size > 256
+    }
 
     private var identity: Identity? = null
     private var epoch: Long = 0
@@ -707,7 +716,9 @@ class SidepathService : Service() {
         val addrHex = candidate.device.address.replace(":", "")
         if (peers.containsKey(addrHex) || connectingPeers.containsKey(addrHex)) return false
         if ((reconnectAfterMs[addrHex] ?: 0L) > now) return false
-        val advNodeId = candidate.advertisedNodeId
+        // Fall back to the NodeID we previously learned at this address when the advert omits it, so a
+        // coded-PHY peer (NodeID only in its scan response) is still deduped instead of re-dialed.
+        val advNodeId = candidate.advertisedNodeId ?: knownAddrNode[addrHex]
         if (advNodeId != null) {
             if (advNodeId == _nodeId.value) return false
             if (peers.values.any { it.peerId == advNodeId }) return false
@@ -747,6 +758,9 @@ class SidepathService : Service() {
             },
             onLog = { addr, msg -> log("gatt addr=$addr $msg", LogTag.GATT) },
             onNodeInfoRead = { peerId, peerPubKey, caps ->
+                // Remember which node lives at this address so a later scan that lacks the advertised
+                // NodeID can still dedup it (see knownAddrNode) — including the duplicate branches below.
+                synchronized(connectionLock) { knownAddrNode[peerHex] = peerId }
                 connectingPeers.remove(peerHex)
                 connectionFailures.remove(peerHex)
                 reconnectAfterMs.remove(peerHex)
@@ -863,6 +877,18 @@ class SidepathService : Service() {
 
     private fun learnNeighbor(directPeer: NodeId?, addrHex: String, device: BluetoothDevice) {
         if (directPeer == null) return
+        // §4.4 collapse from the inbound side: if this frame arrived via our GATT server (this addr is
+        // not our outbound link to the peer) yet we also hold an outbound link to the same node, and
+        // our NodeID is the larger, drop the redundant outbound and keep the inbound. Covers the case
+        // where the peer dials us after our outbound was already established (onNodeInfoRead only
+        // collapses at outbound-connect time and can't catch a later inbound).
+        val thisAddrIsOurOutbound = peers[addrHex]?.peerId == directPeer
+        if (!thisAddrIsOurOutbound && _nodeId.value >= directPeer) {
+            peers.entries.firstOrNull { it.value.peerId == directPeer && it.value.isUsable }?.let { (outHex, link) ->
+                log("peer=${directPeer.toHex()} now inbound and we are larger — dropping redundant outbound addr=$outHex", LogTag.PEER)
+                removePeerLink(outHex, link, "collapse-inbound")
+            }
+        }
         // Register/refresh inbound server peers so we can notify them back.
         val isOutgoing = peers[addrHex]?.let { it.peerId == directPeer && it.isUsable } == true ||
             peers.values.any { it.peerId == directPeer && it.isUsable }
@@ -1672,7 +1698,9 @@ class SidepathService : Service() {
     }
 
     private fun appendMessage(msg: ReceivedMessage) {
-        _receivedMessages.value = (_receivedMessages.value + msg).takeLast(200)
+        // Atomic CAS update: appendMessage runs from concurrent receive paths, so a plain
+        // read-modify-write of .value could drop a frame that arrived between the two.
+        _receivedMessages.update { (it + msg).takeLast(200) }
     }
 
     private fun log(msg: String, tag: LogTag = LogTag.SYS) {

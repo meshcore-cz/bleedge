@@ -3,19 +3,22 @@
 package macos
 
 import (
+	"time"
+
 	"github.com/meshcore-cz/sidepath-protocol/core"
 )
 
 // MacPeerLink implements core.PeerLink for an outgoing connection owned by the BLE helper. Frames
 // are sent by writing the peer's PACKET_IN characteristic via a helper command keyed by [addr].
 type MacPeerLink struct {
-	peerID core.NodeID
-	addr   string
-	helper *bleHelper
-	mtu    int
-	txPHY  core.PHY
-	rxPHY  core.PHY
-	rssi   int
+	peerID      core.NodeID
+	addr        string
+	helper      *bleHelper
+	mtu         int
+	txPHY       core.PHY
+	rxPHY       core.PHY
+	rssi        int
+	connectedAt time.Time
 }
 
 func (l *MacPeerLink) PeerID() core.NodeID { return l.peerID }

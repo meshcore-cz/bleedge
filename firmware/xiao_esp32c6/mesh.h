@@ -3,6 +3,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <array>
 #include <vector>
 
 namespace mesh {
@@ -138,6 +139,15 @@ void buildAnnounce(const uint8_t selfId[NODE_ID_LEN], uint16_t caps, uint64_t ep
                    std::vector<uint8_t>& out);
 
 void buildNodeInfo(const uint8_t pubKey[PUBKEY_LEN], uint16_t caps, std::vector<uint8_t>& out);
+
+// Builds a source-routed TRACE_RESPONSE replying to a TRACE_REQUEST that was delivered to us.
+// [req] is the parsed request header and [reqDg]/[reqLen] its raw bytes (needed to read the path).
+// The reply's route is reverse(request path) + request source, and its body echoes the tag, metric
+// and forward path. [datagramId] is the new response id; [tagOut] receives the request tag for
+// logging. Returns false if the request body can't be parsed or the route would exceed MAX_ROUTE_HOPS.
+bool buildTraceResponse(const DatagramHeader& req, const uint8_t* reqDg, size_t reqLen,
+                        const uint8_t selfId[NODE_ID_LEN], const uint8_t datagramId[DATAGRAM_ID_LEN],
+                        std::vector<uint8_t>& out, uint32_t& tagOut);
 
 void randomTransferId(uint8_t out[TRANSFER_ID_LEN]);
 void fragment(const uint8_t* dg, size_t len, size_t mtu,

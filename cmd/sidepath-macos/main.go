@@ -324,6 +324,13 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 			ts := time.Now().Format("15:04:05")
 			emitUI(fmt.Sprintf("[%s] --- disconnected: %s", ts, id))
 		},
+		OnTrace: func(resp core.TraceResponseBody, rtt time.Duration) {
+			if headless {
+				return
+			}
+			ts := time.Now().Format("15:04:05")
+			emitUI(fmt.Sprintf("[%s] %s", ts, renderTraceResponse(resp, rtt)))
+		},
 	})
 
 	// Run node in background
@@ -511,6 +518,28 @@ func formatRoute(route []core.NodeID) string {
 		parts[i] = id.String()
 	}
 	return strings.Join(parts, " -> ")
+}
+
+// renderTraceResponse formats a Sidepath control trace response (the reply to a `trace` command)
+// for the TUI: the round-trip time plus the forward path of relays the request traversed.
+func renderTraceResponse(r core.TraceResponseBody, rtt time.Duration) string {
+	path := "direct"
+	if len(r.ForwardPath) > 0 {
+		path = formatRoute(r.ForwardPath)
+	}
+	return fmt.Sprintf("TRACE result tag=%08x metric=%s rtt=%s path=[%s]",
+		r.Tag, traceMetricName(r.Metric), rtt.Round(time.Millisecond), path)
+}
+
+func traceMetricName(m core.TraceMetric) string {
+	switch m {
+	case core.TraceMetricRSSIDBM:
+		return core.TraceMetricNameRSSI
+	case core.TraceMetricSNRQ4:
+		return core.TraceMetricNameSNR
+	default:
+		return core.TraceMetricNameUnknown
+	}
 }
 
 func renderTraceResult(r core.TraceResult) string {

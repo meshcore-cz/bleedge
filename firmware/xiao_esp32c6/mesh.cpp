@@ -497,6 +497,104 @@ void buildNodeInfo(const uint8_t pubKey[PUBKEY_LEN], uint16_t caps, std::vector<
   out.push_back((uint8_t)(caps >> 8));
 }
 
+// Finds the value of integer [wantKey] in a CBOR map [m], returning a pointer/len into [m]. Used to
+// walk the datagram envelope, the control message, and the trace body (all keyasint maps).
+static bool findMapValue(const uint8_t* m, size_t len, uint64_t wantKey,
+                         const uint8_t** valOut, size_t* valLenOut) {
+  if (len < 1 || (m[0] >> 5) != 5) return false;  // major type 5 = map
+  uint8_t ai = m[0] & 0x1f;
+  if (ai >= 24) return false;
+  size_t p = 1;
+  for (uint8_t i = 0; i < ai; i++) {
+    size_t kl = cborItemLen(m + p, len - p);
+    if (!kl) return false;
+    size_t v = p + kl;
+    size_t vl = cborItemLen(m + v, len - v);
+    if (!vl) return false;
+    uint64_t key = 0;
+    if (cborUint(m + p, kl, key) && key == wantKey) {
+      *valOut = m + v;
+      *valLenOut = vl;
+      return true;
+    }
+    p = v + vl;
+  }
+  return false;
+}
+
+// Reads a CBOR array of NODE_ID_LEN byte strings at [arr], appending each to [out].
+static void collectNodes(const uint8_t* arr, size_t len,
+                         std::vector<std::array<uint8_t, NODE_ID_LEN>>& out) {
+  if (!arr || len < 1 || (arr[0] >> 5) != 4) return;  // major type 4 = array
+  uint8_t ai = arr[0] & 0x1f;
+  if (ai >= 24) return;
+  size_t pos = 1;
+  for (uint8_t i = 0; i < ai; i++) {
+    if (pos >= len || arr[pos] != (0x40 | NODE_ID_LEN) || pos + 1 + NODE_ID_LEN > len) return;
+    std::array<uint8_t, NODE_ID_LEN> id;
+    memcpy(id.data(), arr + pos + 1, NODE_ID_LEN);
+    out.push_back(id);
+    pos += 1 + NODE_ID_LEN;
+  }
+}
+
+bool buildTraceResponse(const DatagramHeader& req, const uint8_t* reqDg, size_t reqLen,
+                        const uint8_t selfId[NODE_ID_LEN], const uint8_t datagramId[DATAGRAM_ID_LEN],
+                        std::vector<uint8_t>& out, uint32_t& tagOut) {
+  if (!req.payload || req.payloadLen < 1) return false;
+  // Control message map → body (key 2) → trace request fields: tag (key 1), metric (key 2).
+  const uint8_t* body = nullptr; size_t bodyLen = 0;
+  if (!findMapValue(req.payload, req.payloadLen, 2, &body, &bodyLen)) return false;
+  const uint8_t* tagVal = nullptr; size_t tagValLen = 0;
+  uint64_t tag = 0, metric = 1;  // metric default = RSSI_DBM (1)
+  if (!findMapValue(body, bodyLen, 1, &tagVal, &tagValLen) || !cborUint(tagVal, tagValLen, tag)) return false;
+  const uint8_t* metVal = nullptr; size_t metValLen = 0;
+  if (findMapValue(body, bodyLen, 2, &metVal, &metValLen)) cborUint(metVal, metValLen, metric);
+  tagOut = (uint32_t)tag;
+
+  // Forward path = the relays the request crossed (KEY_PATH); the destination never records itself.
+  std::vector<std::array<uint8_t, NODE_ID_LEN>> path;
+  const uint8_t* pathArr = nullptr; size_t pathArrLen = 0;
+  if (findMapValue(reqDg, reqLen, KEY_PATH, &pathArr, &pathArrLen)) collectNodes(pathArr, pathArrLen, path);
+
+  // Return route = reversed relays + the originator.
+  std::vector<std::array<uint8_t, NODE_ID_LEN>> route;
+  for (size_t i = path.size(); i-- > 0;) route.push_back(path[i]);
+  std::array<uint8_t, NODE_ID_LEN> src;
+  memcpy(src.data(), req.source, NODE_ID_LEN);
+  route.push_back(src);
+  if (route.size() > MAX_ROUTE_HOPS) return false;
+
+  // TraceResponseBody: {1:tag, 2:metric, 3:forwardPath, 4:forwardSamples=[], 5:returnSamples=[]}.
+  std::vector<uint8_t> tbody;
+  emitMapHeader(tbody, 5);
+  emitUint(tbody, 1); emitUint(tbody, tag);
+  emitUint(tbody, 2); emitUint(tbody, metric);
+  emitUint(tbody, 3); emitArrayHeader(tbody, path.size());
+  for (auto& n : path) emitBstr(tbody, n.data(), NODE_ID_LEN);
+  emitUint(tbody, 4); emitArrayHeader(tbody, 0);
+  emitUint(tbody, 5); emitArrayHeader(tbody, 0);
+
+  std::vector<uint8_t> ctrl;
+  emitMapHeader(ctrl, 2);
+  emitUint(ctrl, 1); emitUint(ctrl, CONTROL_TRACE_RESPONSE);
+  emitUint(ctrl, 2); ctrl.insert(ctrl.end(), tbody.begin(), tbody.end());
+
+  out.clear();
+  emitMapHeader(out, 9);
+  emitUint(out, KEY_VERSION); emitUint(out, DATAGRAM_VERSION);
+  emitUint(out, KEY_ID); emitBstr(out, datagramId, DATAGRAM_ID_LEN);
+  emitUint(out, KEY_SOURCE); emitBstr(out, selfId, NODE_ID_LEN);
+  emitUint(out, KEY_DEST); emitBstr(out, req.source, NODE_ID_LEN);
+  emitUint(out, KEY_TTL); emitUint(out, route.size());
+  emitUint(out, KEY_ROUTE); emitArrayHeader(out, route.size());
+  for (auto& n : route) emitBstr(out, n.data(), NODE_ID_LEN);
+  emitUint(out, KEY_ROUTE_CURSOR); emitUint(out, 0);
+  emitUint(out, KEY_PROTOCOL); emitUint(out, PROTO_SIDEPATH_CONTROL);
+  emitUint(out, KEY_PAYLOAD); emitBstr(out, ctrl.data(), ctrl.size());
+  return true;
+}
+
 void randomTransferId(uint8_t out[TRANSFER_ID_LEN]) {
 #ifdef ESP_PLATFORM
   esp_fill_random(out, TRANSFER_ID_LEN);
