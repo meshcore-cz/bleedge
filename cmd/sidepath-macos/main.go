@@ -333,11 +333,22 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 	// MeshCore bridge: tap the meshcore-go backend and re-flood packets. The outbound direction
 	// (Sidepath channel -> MeshCore GRP_TXT) is driven from OnMessage above via this same bridge.
 	if meshcoreBridge {
+		// A bridge tagging packets with its single configured network lets receivers attribute them
+		// immediately (SPMC framing, §13.1); with zero or several networks we can't disambiguate, so
+		// we emit the legacy raw payload and receivers fall back to signed-announce resolution.
+		var bridgeNetworkCode string
+		if len(bridges) == 1 {
+			bridgeNetworkCode = bridges[0].Code
+		}
 		br = mcbridge.New(mcbridge.Config{Socket: meshcoreSocket, Log: bridgeLog})
 		go br.Run(ctx, func(pkt mcbridge.Packet) {
+			// Frame the raw OTA packet with the bridge's network (no-op when bridgeNetworkCode is "").
+			// Dedup/content-hash on every receiver keys on the inner raw, so framed vs raw copies of
+			// the same packet collapse identically.
+			framed := core.FrameMeshCorePacket(bridgeNetworkCode, pkt.Bytes)
 			switch pkt.Mode {
 			case mcbridge.ForwardFlood:
-				tx, err := node.SendMeshCoreRawWithInfo(pkt.Bytes)
+				tx, err := node.SendMeshCoreRawWithInfo(framed)
 				if err != nil {
 					bridgeLog(fmt.Sprintf("meshcore bridge: flood failed: %v packet=%s", err, pkt.Summary()))
 					return
@@ -356,7 +367,7 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 					// (recipient simply not on our mesh) is diagnosable at a glance.
 					bridgeLog(fmt.Sprintf("meshcore bridge: dest hash %s matches no Sidepath node — known=[%s]",
 						targetHex, knownNodeHashes(node)))
-					tx, err := node.SendMeshCoreRawWithInfo(pkt.Bytes)
+					tx, err := node.SendMeshCoreRawWithInfo(framed)
 					if err != nil {
 						bridgeLog(fmt.Sprintf("meshcore bridge: direct->flood failed: %v packet=%s", err, pkt.Summary()))
 						return
@@ -368,7 +379,7 @@ NOTE: macOS CoreBluetooth does NOT support LE Coded PHY.
 				bridgeLog(fmt.Sprintf("meshcore bridge: dest hash %s -> %d candidate(s): %s  [%s]",
 					targetHex, len(cands), describeCandidates(node, cands), pkt.Summary()))
 				for _, dst := range cands {
-					tx, err := node.SendMeshCoreRawToWithInfo(dst, pkt.Bytes)
+					tx, err := node.SendMeshCoreRawToWithInfo(dst, framed)
 					if err != nil {
 						bridgeLog(fmt.Sprintf("meshcore bridge: direct failed dst=%s [%s] err=%v", dst, node.NameFor(dst), err))
 						continue

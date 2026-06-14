@@ -47,6 +47,10 @@ object MeshCoreType {
  * Decoded MeshCore ADVERT (node advertisement) payload — all the properties meshpkt's
  * `decodeAdvert` op exposes (§ advert.go). [timestampSec] is the advert's own broadcast time
  * (epoch seconds). [nodeType]: 0=unknown 1=chat 2=repeater 3=room 4=sensor.
+ *
+ * [networkCode] is not part of the MeshCore advert itself — it's attached by the receiving service
+ * from the signed `bridges` of the Sidepath carrier that bridged this advert (§8.3), so each bridged
+ * advert carries which Meshcore network it came through. Blank when the carrier advertises no network.
  */
 data class MeshCoreAdvert(
     val publicKeyHex: String,
@@ -57,6 +61,7 @@ data class MeshCoreAdvert(
     val lat: Double,
     val lon: Double,
     val sigVerified: Boolean,
+    val networkCode: String = "",
 )
 
 /**
@@ -77,6 +82,9 @@ data class MeshCorePacket(
     val channelSender: String? = null,
     val channelText: String? = null,
     val receiveCount: Int = 1,
+    // The external network the bridge embedded in the carrier frame (SPMC, §13.1), or "" when the
+    // packet was bridged untagged. Unsigned carrier tag — informational; not authenticated.
+    val networkCode: String = "",
 )
 
 /**

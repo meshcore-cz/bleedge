@@ -30,6 +30,7 @@ import cz.meshcore.sidepath.chat.ChatTyping
 import cz.meshcore.sidepath.meshcore.MeshCoreAdvert
 import cz.meshcore.sidepath.meshcore.MeshCoreCodec
 import cz.meshcore.sidepath.meshcore.MeshCoreDirect
+import cz.meshcore.sidepath.meshcore.MeshCoreCarrier
 import cz.meshcore.sidepath.meshcore.MeshCorePacket
 import cz.meshcore.sidepath.meshcore.MeshCoreType
 import cz.meshcore.sidepath.protocol.AckBody
@@ -866,23 +867,45 @@ class SidepathService : Service() {
      * Handles a received MeshCore-carrying datagram: every sighting updates the MeshCore Rx Log
      * receive count, while side effects are deduped on the inner MeshCore packet bytes.
      */
+    /**
+     * The Meshcore network code a Sidepath [carrier] node bridges, from its signed v2 ANNOUNCE
+     * `bridges` (§8.3). A carrier bridging exactly one network resolves unambiguously; with several
+     * (or none, or no announce heard yet) returns blank so callers don't mis-attribute.
+     */
+    private fun carrierNetworkCode(carrier: NodeId): String {
+        if (!::router.isInitialized) return ""
+        val codes = router.topology.getNode(carrier)?.bridges?.map { it.code }?.distinct().orEmpty()
+        return codes.singleOrNull().orEmpty()
+    }
+
     private fun handleMeshCorePacket(dg: Datagram, addrHex: String, raw: ByteArray) {
-        val hash = sha256(dg.payload)
+        // The carrier payload may carry an optional SPMC frame tagging the bridge's network (§13.1).
+        // Strip it here: [embeddedCode] is the bridged network ("" when legacy raw / untagged), and
+        // [mcRaw] is the inner MeshCore packet. Everything downstream — dedup/content hash, envelope
+        // decode, persisted raw — operates on [mcRaw] so framed and legacy-raw copies of the same
+        // packet dedup identically across a mixed bridge fleet.
+        val (embeddedCode, mcRaw) = MeshCoreCarrier.unframe(dg.payload)
+        val hash = sha256(mcRaw)
         val contentId = hash.copyOf(6).toHex()
         val rssi = peers[addrHex]?.rssi ?: RSSI_UNKNOWN
         val firstSight = meshCoreContentSeen.firstSight(hash.toHex())
         val existing = _meshCorePackets.value.firstOrNull { it.contentId == contentId }
-        val env = existing?.envelope ?: MeshCoreCodec.decodeEnvelope(dg.payload)
+        val env = existing?.envelope ?: MeshCoreCodec.decodeEnvelope(mcRaw)
         log(
-            "meshcore rx carrier dg=${dg.id.take(4).toHex()} content=$contentId raw=${dg.payload.size}B " +
+            "meshcore rx carrier dg=${dg.id.take(4).toHex()} content=$contentId raw=${mcRaw.size}B " +
                 "type=${env?.type ?: "decode-failed"} route=${env?.route ?: "?"} hops=${env?.hopCount ?: -1} first=$firstSight",
             LogTag.MSG,
         )
 
-        // MeshCore ADVERT → discovered-contacts feed.
+        // MeshCore ADVERT → discovered-contacts feed. Tag it with the network of the Sidepath carrier
+        // that bridged it (from the carrier's signed v2 ANNOUNCE bridges, §8.3) so the advert carries
+        // its network. A carrier bridging one network resolves unambiguously; otherwise blank.
         if (firstSight && env != null && env.type == MeshCoreType.ADVERT && env.payload.isNotEmpty()) {
             MeshCoreCodec.decodeAdvert(env.payload)?.let { adv ->
-                _meshCoreAdverts.update { (listOf(adv) + it).take(maxRxPackets) }
+                // Prefer the network the bridge embedded in the carrier frame; fall back to resolving
+                // it from the carrier's signed v2 ANNOUNCE bridges (§8.3) when untagged.
+                val carrierNet = embeddedCode.ifBlank { carrierNetworkCode(dg.source) }
+                _meshCoreAdverts.update { (listOf(adv.copy(networkCode = carrierNet)) + it).take(maxRxPackets) }
             }
         }
 
@@ -920,7 +943,7 @@ class SidepathService : Service() {
                         meshCoreRoute = env.route + transport,
                         meshCoreHops = env.hopCount,
                         meshCorePacketId = contentId,
-                        meshCorePacketRaw = dg.payload,
+                        meshCorePacketRaw = mcRaw,
                         // The local Sidepath datagram that carried this MeshCore packet — persisted so
                         // the (Sidepath-first) packet detail + its datagram id survive a restart.
                         raw = dg.encode(),
@@ -942,7 +965,7 @@ class SidepathService : Service() {
                     pathHashSize = env.pathHashSize,
                     routeLabel = env.route,
                     hopsHex = env.hops.joinToString(",") { it.toHex() },
-                    packetHex = dg.payload.toHex(),
+                    packetHex = mcRaw.toHex(),
                     carrierHex = dg.encode().toHex(),
                 )
                 _meshCoreHeards.update { m ->
@@ -988,7 +1011,7 @@ class SidepathService : Service() {
                         meshCoreRoute = env.route + transport,
                         meshCoreHops = env.hopCount,
                         meshCorePacketId = contentId,
-                        meshCorePacketRaw = dg.payload,
+                        meshCorePacketRaw = mcRaw,
                         raw = dg.encode(),
                         rssi = rssi,
                         sentAtMs = dm.timestampSec * 1000,
@@ -1023,9 +1046,12 @@ class SidepathService : Service() {
         val packet = MeshCorePacket(
             timestampMs = System.currentTimeMillis(),
             source = dg.source, datagramId = dg.id, path = dg.path,
-            directRssi = rssi, raw = dg.payload, envelope = env, contentId = contentId,
+            directRssi = rssi, raw = mcRaw, envelope = env, contentId = contentId,
             channelSender = sender, channelText = text,
             receiveCount = (existing?.receiveCount ?: 0) + 1,
+            // The network the bridge embedded in the carrier frame (§13.1); preserved across
+            // re-emissions of the same packet so a later untagged copy doesn't blank it.
+            networkCode = embeddedCode.ifBlank { existing?.networkCode.orEmpty() },
         )
         _meshCorePackets.update { packets ->
             (listOf(packet) + packets.filterNot { it.contentId == contentId }).take(maxRxPackets)

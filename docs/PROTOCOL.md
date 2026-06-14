@@ -823,6 +823,38 @@ encryption, and routing remain MeshCore concerns. Sidepath MUST NOT extract
 selected fields from a tunneled MeshCore packet into its own datagram envelope
 or partially reimplement the semantics of that tunneled packet.
 
+#### Bridged MeshCore packet carriage (SPMC framing)
+
+By default the `MESHCORE_PACKET` payload is the raw MeshCore over-the-air packet
+carried verbatim. When a bridge knows the external network a packet was heard on
+(it bridges exactly one network), it MAY prepend a small, self-describing frame so
+receivers can attribute the packet to that network immediately, without waiting
+for the bridge's signed v2 ANNOUNCE `bridges` (§8.3). Absence of the frame means a
+legacy raw payload — receivers MUST accept both forms.
+
+```text
+framed payload (only when the bridge has a single network):
+  magic        [4]  ASCII "SPMC"          # Sidepath-MeshCore bridged marker
+  version      [1]  = 1
+  code_len     [1]  uint8 (1..MAX_NETWORK_CODE_BYTES)
+  code_utf8    [code_len]
+  raw_meshcore [...]                       # the original OTA packet, unchanged
+```
+
+Receiver rule: if the payload starts with `SPMC` + version `0x01` and a valid
+`code_len`, parse `(networkCode, raw_meshcore)`; otherwise treat the whole payload
+as `("", raw_meshcore)`.
+
+Dedup and CoreScope content hashing MUST operate on the inner `raw_meshcore`, never
+the framed payload. This is what makes the change safe across a mixed bridge fleet:
+the same logical packet bridged by a legacy (raw) bridge and a new (framed) bridge
+produces the identical content hash and dedups as one.
+
+The embedded code is **unsigned** — a carrier could mislabel it. This is acceptable
+because a malicious carrier can already forge announces; the signed-announce path
+(§8.3) remains the trustworthy source when present, and receivers SHOULD fall back
+to it when the frame is absent.
+
 ### 13.2 Native Meshward channels
 
 Meshward also defines a native `CHANNEL_TEXT` subtype. Its encrypted
