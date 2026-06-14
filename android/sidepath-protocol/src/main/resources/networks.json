@@ -6,7 +6,7 @@
     "bandwidthHz": 62500,
     "sf": 7,
     "cr": 5,
-    "analyzerUrls": ["https://analyzer.meshcore.cz/#/packets/"],
+    "analyzerUrls": ["analyzer.meshcore.cz","analyzer.meshcore.website","mc.pp0.co"],
     "mqtt": [],
     "description": "Czech regional MeshCore network on the EU868 band. Default preset for new devices.",
     "geoJson": {
