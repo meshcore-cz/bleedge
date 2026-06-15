@@ -100,7 +100,7 @@ func appendString16(buf []byte, s string) []byte {
 // The magic stays "SIDEPATH-ANNOUNCE-V1" (a domain-separation tag); the layout is selected by the
 // version field, so v1 announces sign byte-identically to the original layout.
 func AnnounceSignedMessage(pub []byte, epoch uint64, seq uint32, timestamp int64, caps Capabilities, neighbors []NodeID, name, desc, platform string, version uint8, bridges []BridgeAd, infos []NeighborInfo) []byte {
-	buf := make([]byte, 0, 128+len(neighbors)*NodeIDBytes+len(name)+len(desc)+len(platform)+len(infos)*17)
+	buf := make([]byte, 0, 128+len(neighbors)*NodeIDBytes+len(name)+len(desc)+len(platform)+len(infos)*23)
 	buf = append(buf, asciiNul("SIDEPATH-ANNOUNCE-V1")...)
 	buf = append(buf, version)
 	buf = append(buf, pub...)
@@ -141,6 +141,12 @@ func AnnounceSignedMessage(pub []byte, epoch uint64, seq uint32, timestamp int64
 			buf = append(buf, uint8(n.RxPHY))
 			buf = append(buf, uint8(n.Dir))
 			buf = appendLE32(buf, n.AgeS)
+			// Extended v3 link hints (§8.8), in fixed field order after the original six.
+			buf = append(buf, uint8(n.Transport))
+			buf = append(buf, byte(n.RSSIEWMA))
+			buf = append(buf, n.QualityQ8)
+			buf = appendLE16(buf, n.LatencyMs)
+			buf = append(buf, n.QueueQ8)
 		}
 	}
 	return buf

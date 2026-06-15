@@ -552,13 +552,18 @@ with `bridge_count == 0`, because v3 implies v2's layout):
 
 ```text
 neighbor_info_count    [2]   uint16 little-endian
-  per entry:
+  per entry (23 bytes):
     node_id            [10]
     rssi               [1]   int8 (dBm; 0 means "no sample")
     tx_phy             [1]   uint8 (0 unknown, 1 = 1M, 2 = 2M, 3 = LE Coded)
     rx_phy             [1]   uint8 (same encoding as tx_phy)
     direction          [1]   uint8 (1 = outgoing, 2 = incoming)
     age_s              [4]   uint32 little-endian (seconds since last packet received)
+    transport          [1]   uint8 (0 unknown, 1 = BLE, 2 = MeshCore, 3 = TCP, 4 = USB)
+    rssi_ewma          [1]   int8 (smoothed dBm; 0 = unknown)
+    quality_q8         [1]   uint8 (recent reliability 0..255; 0 = unknown)
+    latency_ms         [2]   uint16 little-endian (capped; 0 = unknown)
+    queue_q8           [1]   uint8 (congestion 0..255; 0 = none/unknown)
 ```
 
 Entries MUST be sorted by `node_id` and MUST NOT contain duplicate IDs. On a v3
@@ -580,7 +585,7 @@ Before accepting or relaying an announce, a verifying node MUST:
 
 1. decode the control payload and announce body;
 2. require `announce_version` to be in `MIN_ANNOUNCE_VERSION..ANNOUNCE_VERSION`
-   (currently `{1, 2}`);
+   (currently `{1, 2, 3}`);
 3. require `public_key` to be exactly 32 bytes;
 4. derive `node_id = public_key[0:10]`;
 5. require outer datagram `source == node_id`;
@@ -588,10 +593,14 @@ Before accepting or relaying an announce, a verifying node MUST:
 7. require the neighbor list to be sorted and unique;
 8. reject any `bridges` on a v1 body, bound the array to `MAX_BRIDGES`, and
    validate each entry (§8.7);
-9. reconstruct the exact signed byte sequence **for the carried
-   `announce_version`** (appending the `bridges` section when `>= 2`);
-10. verify the Ed25519 signature; and
-11. reject the announce on any failure.
+9. reject any `neighbor_info` on a sub-v3 body, and reject a body that carries
+   both a non-empty `neighbors` list and `neighbor_info`; validate each
+   `neighbor_info` entry (§8.8);
+10. reconstruct the exact signed byte sequence **for the carried
+   `announce_version`** (appending the `bridges` section when `>= 2`, and the
+   `neighbor_info` section when `== 3`);
+11. verify the Ed25519 signature; and
+12. reject the announce on any failure.
 
 A valid announce MAY then update topology state and MAY be flood-relayed.
 
@@ -681,24 +690,33 @@ A node MAY advertise per-link details for each of its directly connected
 neighbors. When it does, it emits `announce_version == 3`, carries the neighbors in
 `neighbor_info` (CBOR key 13), and leaves the bare `neighbors` list (key 7) empty.
 
-Each `neighbor_info` entry is a CBOR map:
+Each `neighbor_info` entry is a CBOR map. Keys 1–6 are the original per-link
+fields; keys 7–11 are stable, smoothed link-quality summaries (routing hints, not
+live state) added so route selection can weigh links across transports and PHYs:
 
-| Key | Field       | Type      | Notes                                                  |
-| --: | ----------- | --------- | ------------------------------------------------------ |
-|   1 | `id`        | bytes(10) | Neighbor NodeID                                        |
-|   2 | `rssi`      | int8      | Last measured RSSI in dBm; `0` means "no sample"       |
-|   3 | `tx_phy`    | uint8     | BLE PHY for transmit: 0 unknown, 1 = 1M, 2 = 2M, 3 = LE Coded |
-|   4 | `rx_phy`    | uint8     | BLE PHY for receive; same encoding as `tx_phy`         |
-|   5 | `direction` | uint8     | Which side opened the link: 1 = outgoing, 2 = incoming |
-|   6 | `age_s`     | uint32    | Seconds since the last packet was received from this neighbor |
+| Key | Field        | Type      | Notes                                                  |
+| --: | ------------ | --------- | ------------------------------------------------------ |
+|   1 | `id`         | bytes(10) | Neighbor NodeID                                        |
+|   2 | `rssi`       | int8      | Last measured RSSI in dBm; `0` means "no sample"       |
+|   3 | `tx_phy`     | uint8     | BLE PHY for transmit: 0 unknown, 1 = 1M, 2 = 2M, 3 = LE Coded |
+|   4 | `rx_phy`     | uint8     | BLE PHY for receive; same encoding as `tx_phy`         |
+|   5 | `direction`  | uint8     | Which side opened the link: 1 = outgoing, 2 = incoming |
+|   6 | `age_s`      | uint32    | Seconds since the last packet was received from this neighbor |
+|   7 | `transport`  | uint8     | Link technology: 0 unknown, 1 = BLE, 2 = MeshCore, 3 = TCP, 4 = USB |
+|   8 | `rssi_ewma`  | int8      | Smoothed RSSI in dBm (steadier than `rssi`); `0` = unknown |
+|   9 | `quality_q8` | uint8     | Normalized recent reliability, `0`–`255` (255 = excellent); `0` = unknown |
+|  10 | `latency_ms` | uint16    | Representative recent round-trip latency in ms, capped; `0` = unknown |
+|  11 | `queue_q8`   | uint8     | Normalized congestion/backpressure, `0`–`255`; `0` = none/unknown |
 
-Keys 2–6 use `omitempty`: a zero value is omitted from the CBOR map but is still
+Keys 2–11 use `omitempty`: a zero value is omitted from the CBOR map but is still
 covered (as a zero) by the fixed signed layout in §8.3.
 
 Constraints: at most `255` entries; entries MUST be sorted by `id` and MUST NOT
 contain duplicate IDs; `tx_phy` and `rx_phy` MUST be `<= 3`; `direction` MUST be
-`1` or `2`. The values describe the announcing node's own view of each link and
-are advisory link-quality/topology metadata.
+`1` or `2`; `transport` MUST be `<= 4`. The values describe the announcing node's
+own view of each link and are advisory link-quality/topology metadata. The
+`quality_q8` score is the single most useful field for route selection, because
+the same `rssi` means very different things on different PHYs and transports.
 
 ---
 
@@ -840,14 +858,29 @@ A source-routed datagram MUST NOT be flood-relayed if its next hop is unavailabl
 To send a unicast datagram to `destination`:
 
 1. if destination is a direct neighbor, use `route = [destination]`;
-2. otherwise run BFS over the learned topology graph, using the originating node's
-   **own neighbor table** as the source node's adjacency. A node never appears in
-   its own topology (it does not process its own `ANNOUNCE`), so its first hop MUST
-   be taken from the neighbor table — a BFS that only reads topology adjacency would
-   dead-end at the source and find no multi-hop route;
-3. if a path is known, use that complete route including destination; and
-4. if no path is known, MAY fall back to flood routing for protocols that permit
+2. otherwise build a **weighted topology graph** from the learned topology and the
+   originating node's **own live link table**, and run the route selector to pick
+   the lowest-cost source route. Edges are weighted by link quality (RSSI/PHY),
+   freshness (`age_s` plus time since the announce was received), and confidence
+   (local observation > reciprocal announced link > one-sided announced link >
+   legacy ID-only edge); the cost model is intended to make extra hops and weak or
+   stale hops more expensive. The originating node's first hop MUST be taken from
+   its own neighbor/live-link table, since a node never appears in its own topology
+   (it does not process its own `ANNOUNCE`) and a search over topology adjacency
+   alone would dead-end at the source;
+3. if one or more routes are found, use the best (lowest-cost) complete route
+   including destination, and MAY retain ranked backups for fast failover; and
+4. if no route is found, MAY fall back to flood routing for protocols that permit
    flooding.
+
+A plain breadth-first search (shortest hop count, ignoring link quality) is a
+conformant fallback and a useful debugging aid, but quality-aware selection is
+preferred when link hints are available.
+
+Announced link details (§8.8) are *routing hints* that seed selection; a node
+SHOULD prefer its own live link observations (ACK success, timeouts, trace
+samples, congestion) over announced values when both exist, and MAY apply
+hysteresis to avoid route flapping.
 
 Applications MAY require an explicit known route and disable fallback flooding.
 Constrained flood-only nodes (e.g. the ESP32 relay) do not perform route selection
@@ -1093,8 +1126,11 @@ A conforming implementation MUST:
 * [ ] use `SIDEPATH_CONTROL` for native announces, ACKs, and traces;
 * [ ] sign every announce field except the signature itself;
 * [ ] verify the exact announce signature layout before trusting topology data;
-* [ ] accept `announce_version` in `{1, 2}` and reconstruct the signed bytes for
-  the carried version, appending the `bridges` section when `>= 2` (§8.7);
+* [ ] accept `announce_version` in `{1, 2, 3}` and reconstruct the signed bytes
+  for the carried version, appending the `bridges` section when `>= 2` (§8.7) and
+  the `neighbor_info` section when `== 3` (§8.8);
+* [ ] reject `neighbor_info` on a sub-v3 body and a body carrying both a non-empty
+  `neighbors` list and `neighbor_info`;
 * [ ] persist and increment `epoch` on startup and use `epoch` plus `seq` for announce freshness;
 * [ ] generate ACKs only when `ACK_REQUESTED` is set;
 * [ ] mark locally originated datagram IDs as seen before sending;

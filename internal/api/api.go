@@ -153,6 +153,15 @@ type NeighborDetail struct {
 	Direction string `json:"direction,omitempty"`
 	// AgeS is seconds since the peer last received a packet from this neighbor.
 	AgeS uint32 `json:"age_s,omitempty"`
+	// The extended v3 link hints (§8.8); each 0 = unknown. Transport is the link
+	// technology ("BLE", "MeshCore", ...); RSSIEWMA is a smoothed RSSI in dBm;
+	// QualityQ8 is a 0..255 recent-reliability score; LatencyMs a representative
+	// round-trip latency; QueueQ8 a 0..255 congestion estimate.
+	Transport string `json:"transport,omitempty"`
+	RSSIEWMA  int    `json:"rssi_ewma,omitempty"`
+	QualityQ8 uint8  `json:"quality_q8,omitempty"`
+	LatencyMs uint16 `json:"latency_ms,omitempty"`
+	QueueQ8   uint8  `json:"queue_q8,omitempty"`
 }
 
 // PeerDetail is the full view of a single node returned by MethodPeer: the same

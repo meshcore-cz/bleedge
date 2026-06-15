@@ -73,18 +73,30 @@ path requires a running daemon.`,
 	},
 }
 
+// edgeView is one node's advertised (or locally observed) view of a link to a
+// neighbor, plus the context needed to weight it: how old the announce carrying
+// it is, and whether it is the local node's own live observation.
+type edgeView struct {
+	det          api.NeighborDetail
+	announceAgeS int64 // seconds since the announcing node's announce arrived; <0 for self/live
+	isSelf       bool
+}
+
 // buildGraph turns the topology into a directed, cost-weighted pathrank graph.
-// Each advertised neighbor relation becomes an edge in both directions: the
-// near end's own link metrics are used when it advertised them, otherwise the
-// far end's view is borrowed and marked Reverse (trusted slightly less).
+// Each advertised neighbor relation becomes an edge in both directions, tagged
+// with a confidence Source: the local node's own links are SourceLocal; an edge
+// both ends advertise is SourceReciprocal; one only the near end advertises is
+// SourceForward; one only the far end advertises (borrowed) is SourceReverse;
+// and a bare v1/v2 ID-only edge is SourceLegacy. Link age is made effective by
+// adding the time since its carrying announce was received.
 func buildGraph(topo *api.TopologyResult) *pathrank.Graph {
-	// near[a][b] is how node a described its link to neighbor b.
-	near := make(map[core.NodeID]map[core.NodeID]pathrank.Link)
-	remember := func(from, to core.NodeID, l pathrank.Link) {
+	// near[a][b] is how node a described (or observed) its link to neighbor b.
+	near := make(map[core.NodeID]map[core.NodeID]edgeView)
+	remember := func(from, to core.NodeID, v edgeView) {
 		if near[from] == nil {
-			near[from] = make(map[core.NodeID]pathrank.Link)
+			near[from] = make(map[core.NodeID]edgeView)
 		}
-		near[from][to] = l
+		near[from][to] = v
 	}
 	for _, n := range topo.Nodes {
 		from, err := core.ParseNodeID(n.NodeID)
@@ -94,7 +106,7 @@ func buildGraph(topo *api.TopologyResult) *pathrank.Graph {
 		if len(n.Links) > 0 {
 			for _, l := range n.Links {
 				if to, err := core.ParseNodeID(l.NodeID); err == nil {
-					remember(from, to, pathrank.Link{RSSI: l.RSSI, HasInfo: l.HasInfo, AgeS: l.AgeS})
+					remember(from, to, edgeView{det: l, announceAgeS: n.LastAnnounceS, isSelf: n.Self})
 				}
 			}
 			continue
@@ -102,7 +114,7 @@ func buildGraph(topo *api.TopologyResult) *pathrank.Graph {
 		// No per-link details (v1/v2 announce): edges are known by ID only.
 		for _, nb := range n.Neighbors {
 			if to, err := core.ParseNodeID(nb); err == nil {
-				remember(from, to, pathrank.Link{})
+				remember(from, to, edgeView{det: api.NeighborDetail{NodeID: nb}, announceAgeS: n.LastAnnounceS, isSelf: n.Self})
 			}
 		}
 	}
@@ -113,19 +125,33 @@ func buildGraph(topo *api.TopologyResult) *pathrank.Graph {
 		if from == to || added[[2]core.NodeID{from, to}] {
 			return
 		}
-		l, ok := near[from][to]
-		if !ok {
-			// The near end never advertised this link; borrow the far end's view.
-			if rev, okr := near[to][from]; okr {
-				l, ok = rev, true
-				l.Reverse = true
-			}
-		}
-		if !ok {
+		fwd, okF := near[from][to]
+		rev, okR := near[to][from]
+		var base edgeView
+		switch {
+		case okF:
+			base = fwd
+		case okR:
+			base = rev // borrow the far end's view of the reverse link
+		default:
 			return
 		}
 		added[[2]core.NodeID{from, to}] = true
-		g.AddLink(from, to, l)
+
+		link := linkFromDetail(base.det, base.announceAgeS)
+		switch {
+		case base.isSelf:
+			link.Source = pathrank.SourceLocal
+		case !base.det.HasInfo:
+			link.Source = pathrank.SourceLegacy
+		case okF && okR:
+			link.Source = pathrank.SourceReciprocal
+		case okF:
+			link.Source = pathrank.SourceForward
+		default:
+			link.Source = pathrank.SourceReverse
+		}
+		g.AddLink(from, to, link)
 	}
 	for a, m := range near {
 		for b := range m {
@@ -134,6 +160,56 @@ func buildGraph(topo *api.TopologyResult) *pathrank.Graph {
 		}
 	}
 	return g
+}
+
+// linkFromDetail converts an API neighbor detail into a pathrank link, folding
+// the time since the carrying announce arrived into an effective link age. The
+// Source field is set by the caller.
+func linkFromDetail(d api.NeighborDetail, announceAgeS int64) pathrank.Link {
+	age := int64(d.AgeS)
+	if announceAgeS > 0 { // remote announce: the edge is at least this much older now
+		age += announceAgeS
+	}
+	return pathrank.Link{
+		Transport: parseTransport(d.Transport),
+		TxPHY:     parsePHY(d.TxPHY),
+		RxPHY:     parsePHY(d.RxPHY),
+		RSSI:      d.RSSI,
+		RSSIEWMA:  d.RSSIEWMA,
+		QualityQ8: d.QualityQ8,
+		AgeS:      uint32(age),
+		RTTms:     d.LatencyMs,
+		QueueQ8:   d.QueueQ8,
+		HasInfo:   d.HasInfo,
+	}
+}
+
+func parsePHY(s string) core.PHY {
+	switch s {
+	case "1M":
+		return core.PHY1M
+	case "2M":
+		return core.PHY2M
+	case "LE Coded":
+		return core.PHYCoded
+	default:
+		return core.PHYUnknown
+	}
+}
+
+func parseTransport(s string) core.Transport {
+	switch s {
+	case "BLE":
+		return core.TransportBLE
+	case "MeshCore":
+		return core.TransportMeshCore
+	case "TCP":
+		return core.TransportTCP
+	case "USB":
+		return core.TransportUSB
+	default:
+		return core.TransportUnknown
+	}
 }
 
 // nodeNames maps each known NodeID to its display name (empty if none).
@@ -177,7 +253,7 @@ func printPaths(out io.Writer, self, dest core.NodeID, routes []pathrank.Route, 
 		fmt.Fprintf(out, "#%d  cost %.1f  %d hop(s): %s\n", i+1, r.Total, len(r.Hops), strings.Join(parts, " → "))
 		for _, h := range r.Hops {
 			fmt.Fprintf(out, "      %s → %s   %s   cost %.1f  [%s]\n",
-				label(h.From), label(h.To), linkMetrics(h.Link), h.Cost.Total, costBreakdown(h.Cost))
+				label(h.From), label(h.To), linkMetrics(h.Link, h.Cost), h.Cost.Total, costBreakdown(h.Cost))
 		}
 		fmt.Fprintln(out)
 	}
@@ -207,20 +283,30 @@ func printPathOverview(out io.Writer, self, dest core.NodeID, routes []pathrank.
 	fmt.Fprintf(out, "  (run 'sp path %s' for the per-hop cost breakdown)\n", shortID(dest.String()))
 }
 
-// linkMetrics renders the raw link facts a hop's cost was derived from.
-func linkMetrics(l pathrank.Link) string {
-	if !l.HasInfo || l.RSSI == 0 {
-		s := "rssi=? age=?"
-		if l.Reverse {
-			s += " (reverse)"
-		}
-		return s
+// linkMetrics renders the raw link facts a hop's cost was derived from: the
+// signal it was judged on, age, transport, confidence source, and the resulting
+// success probability.
+func linkMetrics(l pathrank.Link, c pathrank.Cost) string {
+	var sig string
+	switch {
+	case l.QualityQ8 > 0:
+		sig = fmt.Sprintf("q=%d/255", l.QualityQ8)
+	case l.RSSIEWMA != 0:
+		sig = fmt.Sprintf("rssi~%d", l.RSSIEWMA)
+	case l.RSSI != 0:
+		sig = fmt.Sprintf("rssi=%d", l.RSSI)
+	default:
+		sig = "rssi=?"
 	}
-	s := fmt.Sprintf("rssi=%d age=%s", l.RSSI, lastSeenLabel(int64(l.AgeS)))
-	if l.Reverse {
-		s += " (reverse)"
+	parts := []string{sig, "age=" + lastSeenLabel(int64(l.AgeS))}
+	if l.Transport != core.TransportUnknown {
+		parts = append(parts, l.Transport.String())
 	}
-	return s
+	if l.RTTms > 0 {
+		parts = append(parts, fmt.Sprintf("rtt=%dms", l.RTTms))
+	}
+	parts = append(parts, l.Source.String(), fmt.Sprintf("p=%.2f", c.Prob))
+	return strings.Join(parts, " ")
 }
 
 // costBreakdown lists the non-zero components that make up a hop's cost, so the
@@ -233,10 +319,13 @@ func costBreakdown(c pathrank.Cost) string {
 		}
 	}
 	add("hop", c.Hop)
-	add("rssi", c.RSSI)
-	add("age", c.Age)
+	add("reliability", c.Reliability)
+	add("freshness", c.Freshness)
+	add("latency", c.Latency)
+	add("congestion", c.Congestion)
+	add("transport", c.Transport)
+	add("confidence", c.Confidence)
 	add("unknown", c.Unknown)
-	add("reverse", c.Reverse)
 	return strings.Join(parts, " + ")
 }
 
@@ -249,41 +338,53 @@ type pathResult struct {
 }
 
 type pathRoute struct {
-	Rank  int          `json:"rank"`
-	Total float64      `json:"total_cost"`
-	Path  []string     `json:"path"` // relay hops then dest (hex), as a source route
-	Hops  []pathHopOut `json:"hops"`
+	Rank        int          `json:"rank"`
+	Total       float64      `json:"total_cost"`
+	Reliability float64      `json:"reliability"` // end-to-end success probability
+	Path        []string     `json:"path"`        // relay hops then dest (hex), as a source route
+	Hops        []pathHopOut `json:"hops"`
 }
 
 type pathHopOut struct {
-	From    string        `json:"from"`
-	To      string        `json:"to"`
-	Name    string        `json:"name,omitempty"`
-	RSSI    int           `json:"rssi,omitempty"`
-	HasInfo bool          `json:"has_info"`
-	AgeS    uint32        `json:"age_s,omitempty"`
-	Reverse bool          `json:"reverse,omitempty"`
-	Cost    pathrank.Cost `json:"cost"`
+	From      string        `json:"from"`
+	To        string        `json:"to"`
+	Name      string        `json:"name,omitempty"`
+	Transport string        `json:"transport,omitempty"`
+	RSSI      int           `json:"rssi,omitempty"`
+	RSSIEWMA  int           `json:"rssi_ewma,omitempty"`
+	QualityQ8 uint8         `json:"quality_q8,omitempty"`
+	RTTms     uint16        `json:"rtt_ms,omitempty"`
+	AgeS      uint32        `json:"age_s,omitempty"`
+	Source    string        `json:"source"`
+	HasInfo   bool          `json:"has_info"`
+	Cost      pathrank.Cost `json:"cost"`
 }
 
 func pathJSON(self, dest core.NodeID, routes []pathrank.Route, names map[core.NodeID]string) pathResult {
 	res := pathResult{Self: self.String(), Dest: dest.String()}
 	for i, r := range routes {
-		pr := pathRoute{Rank: i + 1, Total: r.Total}
+		pr := pathRoute{Rank: i + 1, Total: r.Total, Reliability: r.Reliability()}
 		for _, id := range r.Path() {
 			pr.Path = append(pr.Path, id.String())
 		}
 		for _, h := range r.Hops {
-			pr.Hops = append(pr.Hops, pathHopOut{
-				From:    h.From.String(),
-				To:      h.To.String(),
-				Name:    names[h.To],
-				RSSI:    h.Link.RSSI,
-				HasInfo: h.Link.HasInfo,
-				AgeS:    h.Link.AgeS,
-				Reverse: h.Link.Reverse,
-				Cost:    h.Cost,
-			})
+			out := pathHopOut{
+				From:      h.From.String(),
+				To:        h.To.String(),
+				Name:      names[h.To],
+				RSSI:      h.Link.RSSI,
+				RSSIEWMA:  h.Link.RSSIEWMA,
+				QualityQ8: h.Link.QualityQ8,
+				RTTms:     h.Link.RTTms,
+				AgeS:      h.Link.AgeS,
+				Source:    h.Link.Source.String(),
+				HasInfo:   h.Link.HasInfo,
+				Cost:      h.Cost,
+			}
+			if h.Link.Transport != core.TransportUnknown {
+				out.Transport = h.Link.Transport.String()
+			}
+			pr.Hops = append(pr.Hops, out)
 		}
 		res.Routes = append(res.Routes, pr)
 	}

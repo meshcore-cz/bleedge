@@ -349,6 +349,10 @@ func (r *darwinRuntime) Topology() api.TopologyResult {
 			RxPHY:     nb.RxPHY.String(),
 			Direction: directionString(nb.Direction),
 			AgeS:      age,
+			Transport: core.TransportBLE.String(),
+			RSSIEWMA:  nb.RSSIEWMA,
+			QualityQ8: nb.QualityQ8,
+			LatencyMs: nb.RTTms,
 		})
 	}
 	sort.Strings(selfNbrs)
@@ -539,16 +543,11 @@ func (r *darwinRuntime) reverseNeighborDetails(id core.NodeID) []api.NeighborDet
 				if ni.ID != id {
 					continue
 				}
-				out = append(out, api.NeighborDetail{
-					NodeID:    tn.ID.String(),
-					Name:      names[tn.ID],
-					HasInfo:   true,
-					RSSI:      int(ni.RSSI),
-					TxPHY:     ni.TxPHY.String(),
-					RxPHY:     ni.RxPHY.String(),
-					Direction: directionString(ni.Dir),
-					AgeS:      ni.AgeS,
-				})
+				// The reverse entry is keyed/displayed by the advertising node, but
+				// carries that node's link metrics to id.
+				d := neighborInfoDetail(ni, names[tn.ID])
+				d.NodeID = tn.ID.String()
+				out = append(out, d)
 				break
 			}
 			continue
@@ -584,16 +583,7 @@ func (r *darwinRuntime) neighborDetails(tn core.TopoNode) []api.NeighborDetail {
 	if len(tn.NeighborInfo) > 0 {
 		out := make([]api.NeighborDetail, 0, len(tn.NeighborInfo))
 		for _, ni := range tn.NeighborInfo {
-			out = append(out, api.NeighborDetail{
-				NodeID:    ni.ID.String(),
-				Name:      nameOf(ni.ID),
-				HasInfo:   true,
-				RSSI:      int(ni.RSSI),
-				TxPHY:     ni.TxPHY.String(),
-				RxPHY:     ni.RxPHY.String(),
-				Direction: directionString(ni.Dir),
-				AgeS:      ni.AgeS,
-			})
+			out = append(out, neighborInfoDetail(ni, nameOf(ni.ID)))
 		}
 		return out
 	}
@@ -614,6 +604,29 @@ func packetStats(node *blenode.Node, id core.NodeID) (rx, tx uint64, lastRxS int
 		lastRxS = int64(time.Since(lastRX).Seconds())
 	}
 	return rx, tx, lastRxS
+}
+
+// neighborInfoDetail converts a signed v3 NeighborInfo entry into the API shape,
+// carrying both the original per-link fields and the extended quality hints.
+func neighborInfoDetail(ni core.NeighborInfo, name string) api.NeighborDetail {
+	d := api.NeighborDetail{
+		NodeID:    ni.ID.String(),
+		Name:      name,
+		HasInfo:   true,
+		RSSI:      int(ni.RSSI),
+		TxPHY:     ni.TxPHY.String(),
+		RxPHY:     ni.RxPHY.String(),
+		Direction: directionString(ni.Dir),
+		AgeS:      ni.AgeS,
+		RSSIEWMA:  int(ni.RSSIEWMA),
+		QualityQ8: ni.QualityQ8,
+		LatencyMs: ni.LatencyMs,
+		QueueQ8:   ni.QueueQ8,
+	}
+	if ni.Transport != core.TransportUnknown {
+		d.Transport = ni.Transport.String()
+	}
+	return d
 }
 
 // directionString maps a wire connection direction to the same labels the peer
@@ -661,6 +674,11 @@ func (r *darwinRuntime) SendDirect(ctx context.Context, dest, text string, route
 		return res, nil
 	}
 
+	// A direct send (destination is a one-hop neighbor) yields clean link feedback:
+	// the ACK outcome and round-trip time describe that single link. Multi-hop ACKs
+	// are end-to-end and would mis-attribute, so we only feed the link stats here.
+	direct := !flooded && len(used) <= 1
+
 	start := time.Now()
 	ch := make(chan core.NodeID, 1)
 	r.mu.Lock()
@@ -674,11 +692,20 @@ func (r *darwinRuntime) SendDirect(ctx context.Context, dest, text string, route
 
 	select {
 	case <-ctx.Done():
+		if direct {
+			r.node.RecordLinkDelivery(id, false)
+		}
 		return res, nil
 	case from := <-ch:
 		res.Acked = true
 		res.From = from.String()
 		res.RTTMs = time.Since(start).Milliseconds()
+		if direct {
+			r.node.RecordLinkDelivery(id, true)
+			if res.RTTMs > 0 && res.RTTMs <= 65535 {
+				r.node.RecordLinkRTT(id, uint16(res.RTTMs))
+			}
+		}
 		return res, nil
 	}
 }
@@ -758,6 +785,13 @@ func (r *darwinRuntime) Trace(ctx context.Context, dest string, route []string) 
 		path := make([]string, len(out.resp.ForwardPath))
 		for i, id := range out.resp.ForwardPath {
 			path[i] = id.String()
+		}
+		// A trace with no forward relays went straight to a direct neighbor, so its
+		// round-trip time is a clean single-link sample for the live stats.
+		if len(out.resp.ForwardPath) == 0 {
+			if ms := out.rtt.Milliseconds(); ms > 0 && ms <= 65535 {
+				r.node.RecordLinkRTT(dst, uint16(ms))
+			}
 		}
 		return api.TraceResult{
 			Tag:    out.resp.Tag,

@@ -144,9 +144,12 @@ func (b BridgeAd) Valid() bool {
 }
 
 // NeighborInfo is one directly-linked peer as advertised in a v3 ANNOUNCE `neighbor_info` section.
-// It is the announcing node's own view of the link: RSSI in dBm (always negative in practice; 0 means
-// "no sample"), the BLE PHY in each direction, which side opened the link, and how long ago the last
-// packet was received. CBOR is transport; the signed binary (§8.3) is the authenticated form.
+// It is the announcing node's own view of the link. The original fields are the last-sample RSSI in
+// dBm (always negative in practice; 0 means "no sample"), the BLE PHY in each direction, which side
+// opened the link, and how long ago the last packet was received. The extended fields (§8.8) are
+// stable, smoothed link-quality summaries — transport, smoothed RSSI, a normalized recent-reliability
+// score, representative latency, and a congestion estimate — meant as routing hints, not live state;
+// each defaults to 0 = "unknown". CBOR is transport; the signed binary (§8.3) is the authenticated form.
 type NeighborInfo struct {
 	ID    NodeID        `cbor:"1,keyasint"`
 	RSSI  int8          `cbor:"2,keyasint,omitempty"`
@@ -154,14 +157,30 @@ type NeighborInfo struct {
 	RxPHY PHY           `cbor:"4,keyasint,omitempty"`
 	Dir   ConnDirection `cbor:"5,keyasint,omitempty"`
 	AgeS  uint32        `cbor:"6,keyasint,omitempty"`
+	// Transport is the link technology (BLE/MeshCore/TCP/...); 0 = unknown.
+	Transport Transport `cbor:"7,keyasint,omitempty"`
+	// RSSIEWMA is a smoothed RSSI in dBm, steadier than the last sample; 0 = unknown.
+	RSSIEWMA int8 `cbor:"8,keyasint,omitempty"`
+	// QualityQ8 is a normalized 0..255 "this link recently works" score (received/expected,
+	// ACK success, etc.); 255 = excellent, 0 = unknown. More useful than RSSI alone because the
+	// same dBm means very different things on different PHYs/transports.
+	QualityQ8 uint8 `cbor:"9,keyasint,omitempty"`
+	// LatencyMs is a representative recent round-trip latency in ms, capped; 0 = unknown.
+	LatencyMs uint16 `cbor:"10,keyasint,omitempty"`
+	// QueueQ8 is a normalized 0..255 congestion/backpressure estimate; 0 = none/unknown.
+	QueueQ8 uint8 `cbor:"11,keyasint,omitempty"`
 }
 
-// Valid checks the PHY and direction enums are in range.
+// Valid checks the PHY, direction, and transport enums are in range. The Q8 and
+// latency fields span their whole numeric range, so there is nothing to bound.
 func (n NeighborInfo) Valid() bool {
 	if n.TxPHY > PHYCoded || n.RxPHY > PHYCoded {
 		return false
 	}
 	if n.Dir > DirectionBoth {
+		return false
+	}
+	if n.Transport > TransportMax {
 		return false
 	}
 	return true

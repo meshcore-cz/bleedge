@@ -139,6 +139,37 @@ func (p PHY) String() string {
 	}
 }
 
+// Transport identifies the physical link technology a neighbor link runs over.
+// It is advertised per-link in a v3 ANNOUNCE (§8.8) so route selection can treat
+// a BLE Coded-PHY hop differently from, say, a MeshCore/LoRa or TCP hop. 0 means
+// "unknown" (e.g. a legacy announce that predates the field).
+type Transport uint8
+
+const (
+	TransportUnknown  Transport = 0
+	TransportBLE      Transport = 1
+	TransportMeshCore Transport = 2
+	TransportTCP      Transport = 3
+	TransportUSB      Transport = 4
+	// TransportMax is the highest assigned value, used to bound-check the wire.
+	TransportMax = TransportUSB
+)
+
+func (t Transport) String() string {
+	switch t {
+	case TransportBLE:
+		return "BLE"
+	case TransportMeshCore:
+		return "MeshCore"
+	case TransportTCP:
+		return "TCP"
+	case TransportUSB:
+		return "USB"
+	default:
+		return "unknown"
+	}
+}
+
 type Capability uint16
 
 const (

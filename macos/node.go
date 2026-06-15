@@ -1235,6 +1235,14 @@ func (n *Node) Neighbors() []core.Neighbor {
 	return n.router.Neighbors.All()
 }
 
+// RecordLinkRTT and RecordLinkDelivery fold direct-link feedback (a round-trip
+// time, or an ACK-received/timed-out outcome) into the neighbor table's live
+// stats, which in turn seed the quality hints in our v3 ANNOUNCE (§8.8) and the
+// local route ranker. Callers MUST pass only direct-neighbor samples, not
+// end-to-end multi-hop times.
+func (n *Node) RecordLinkRTT(id core.NodeID, ms uint16)    { n.router.Neighbors.RecordRTT(id, ms) }
+func (n *Node) RecordLinkDelivery(id core.NodeID, ok bool) { n.router.Neighbors.RecordDelivery(id, ok) }
+
 // Topology returns all known topology nodes.
 func (n *Node) Topology() []core.TopoNode {
 	return n.router.Topology.Nodes()
