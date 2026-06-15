@@ -34,11 +34,14 @@ Wait for delivery acknowledgement (direct messages only):
   sp send --ack 1a2b3c... "did you get this?"
   sp send --wait 5s 1a2b3c... "..."
 
-Pin an explicit source route instead of letting the node pick one, and print the
-routing details (-v shows them for any send):
+Pin an explicit source route instead of letting the node pick one, or let
+pathrank choose the best route (--path auto), and print the routing details
+(-v shows them for any send):
   sp send --path 1111116e82f1a143...,111111fe43731387... 1a2b3c... "via these relays"
+  sp send --path auto 1a2b3c... "let pathrank route this"
   sp send -v 1a2b3c... "how did this go out?"
 
+Node IDs may be given in full or as any unambiguous short prefix.
 The message is the remaining arguments joined with spaces, so quoting is optional.
 send requires a running daemon.`,
 	Args: cobra.MinimumNArgs(1),
@@ -91,8 +94,27 @@ send requires a running daemon.`,
 		// Show the routing detail block whenever the user asked for it or pinned a path.
 		detail := verbose || len(path) > 0
 
+		// Resolve the destination (full id or short prefix) and the route: --path
+		// auto asks pathrank for the best route, otherwise an explicit relay list.
+		rs := newResolver()
+		dest, err := rs.resolve(dest)
+		if err != nil {
+			return err
+		}
+		var route []string
+		switch {
+		case isAutoPath(path):
+			if route, err = rs.autoRoute(dest); err != nil {
+				return err
+			}
+		case len(path) > 0:
+			if route, err = rs.resolveHops(path); err != nil {
+				return err
+			}
+		}
+
 		if !wantAck {
-			res, err := client.SendDirect(dest, text, path)
+			res, err := client.SendDirect(dest, text, route)
 			if err != nil {
 				return fmt.Errorf("send failed: %w", err)
 			}
@@ -106,7 +128,7 @@ send requires a running daemon.`,
 		// Wait for the ACK.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		res, err := client.SendDirectAck(ctx, dest, text, path, ackWait)
+		res, err := client.SendDirectAck(ctx, dest, text, route, ackWait)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -162,7 +184,7 @@ func init() {
 	sendCmd.Flags().StringP("channel", "c", "", "broadcast on this channel instead of a direct message")
 	sendCmd.Flags().BoolP("ack", "a", false, "wait for a delivery ACK (direct messages only)")
 	sendCmd.Flags().Duration("wait", 0, "wait up to this long for an ACK (implies --ack)")
-	sendCmd.Flags().StringSlice("path", nil, "explicit source route: comma-separated relay NodeIDs to reach the destination (direct messages only)")
+	sendCmd.Flags().StringSlice("path", nil, "source route (direct only): comma-separated relay NodeIDs, or 'auto' to let pathrank pick the best route")
 	sendCmd.Flags().BoolP("verbose", "v", false, "print routing details (datagram id and the route used)")
 	rootCmd.AddCommand(sendCmd)
 }

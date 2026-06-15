@@ -69,6 +69,18 @@ type Node struct {
 	// can be matched back to compute round-trip time. Guarded by traceMu.
 	traceMu     sync.Mutex
 	traceStarts map[uint32]time.Time
+
+	// linkStats counts Sidepath packets (datagrams) received from / sent to each directly-linked peer
+	// over the link's lifetime, keyed by NodeID, plus when we last received one. It is a coarse
+	// link-traffic meter for `sp peers`, not routing state. Guarded by statsMu.
+	statsMu   sync.Mutex
+	linkStats map[core.NodeID]*linkStat
+}
+
+// linkStat is the per-peer packet counters behind Node.linkStats.
+type linkStat struct {
+	rx, tx uint64
+	lastRX time.Time
 }
 
 type TransmitInfo struct {
@@ -139,6 +151,7 @@ func New(cfg Config) *Node {
 		addrRSSI:      make(map[string]int),
 		channels:      make(map[string]*Channel),
 		traceStarts:   make(map[uint32]time.Time),
+		linkStats:     make(map[core.NodeID]*linkStat),
 		logFn:         cfg.LogFn,
 	}
 	if n.announceEpoch == 0 {
@@ -449,6 +462,18 @@ func (n *Node) handleIncomingFrame(raw []byte, fromPeer *core.NodeID, fromAddr s
 	// the neighbor table — and our ANNOUNCE — stay populated even when all peers
 	// connected inbound to us.
 	n.learnNeighbor(dg, fromAddr)
+
+	// Count this received Sidepath packet against the link peer it arrived over
+	// (resolved post-learnNeighbor for inbound links), and stamp the receive time.
+	linkPeer := core.NodeID{}
+	if fromPeer != nil {
+		linkPeer = *fromPeer
+	} else if fromAddr != "" {
+		n.mu.Lock()
+		linkPeer = n.serverPeerIDs[fromAddr]
+		n.mu.Unlock()
+	}
+	n.recordRX(linkPeer)
 
 	actions := n.router.HandleDatagram(dg, fromPeer)
 	n.executeActions(actions)
@@ -1185,6 +1210,9 @@ func (n *Node) sendFramesToLink(link *MacPeerLink, frames []core.Frame) {
 	for _, f := range frames {
 		link.helper.sendCentral(link.addr, f.Encode(), reliable)
 	}
+	if len(frames) > 0 { // one call carries one datagram's fragments
+		n.countTX(link.peerID)
+	}
 }
 
 // notifyFrames pushes frames to a subscribed central (peripheral role) as PACKET_OUT indications.
@@ -1193,6 +1221,12 @@ func (n *Node) sendFramesToLink(link *MacPeerLink, frames []core.Frame) {
 func (n *Node) notifyFrames(centralID string, frames []core.Frame) {
 	for _, f := range frames {
 		n.helper.sendPeripheral(centralID, f.Encode())
+	}
+	if len(frames) > 0 { // one call carries one datagram's fragments
+		n.mu.Lock()
+		peerID := n.serverPeerIDs[centralID]
+		n.mu.Unlock()
+		n.countTX(peerID)
 	}
 }
 
@@ -1263,6 +1297,56 @@ func (n *Node) PeerLinks() []PeerInfo {
 	}
 	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0 })
 	return out
+}
+
+// recordRX counts one Sidepath packet received from a peer and stamps the
+// receive time. countTX counts one packet sent to a peer. A zero NodeID (peer
+// not yet identified) is ignored so unattributed traffic does not accumulate
+// under the broadcast id.
+func (n *Node) recordRX(id core.NodeID) {
+	if s := n.stat(id); s != nil {
+		n.statsMu.Lock()
+		s.rx++
+		s.lastRX = time.Now()
+		n.statsMu.Unlock()
+	}
+}
+
+func (n *Node) countTX(id core.NodeID) {
+	if s := n.stat(id); s != nil {
+		n.statsMu.Lock()
+		s.tx++
+		n.statsMu.Unlock()
+	}
+}
+
+// stat returns the counter record for id, creating it on first use; nil for the
+// zero NodeID.
+func (n *Node) stat(id core.NodeID) *linkStat {
+	var zero core.NodeID
+	if id == zero {
+		return nil
+	}
+	n.statsMu.Lock()
+	defer n.statsMu.Unlock()
+	s := n.linkStats[id]
+	if s == nil {
+		s = &linkStat{}
+		n.linkStats[id] = s
+	}
+	return s
+}
+
+// PacketStats returns the lifetime RX/TX Sidepath-packet counts for a
+// directly-linked peer and when a packet was last received from it (zero time
+// if never).
+func (n *Node) PacketStats(id core.NodeID) (rx, tx uint64, lastRX time.Time) {
+	n.statsMu.Lock()
+	defer n.statsMu.Unlock()
+	if s := n.linkStats[id]; s != nil {
+		return s.rx, s.tx, s.lastRX
+	}
+	return 0, 0, time.Time{}
 }
 
 // NodeID returns this node's ID.

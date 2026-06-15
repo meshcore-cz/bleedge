@@ -20,10 +20,14 @@ var traceCmd = &cobra.Command{
 	Short: "Trace the route to a node",
 	Long: `trace sends a Sidepath trace to a destination node and reports the round-trip
 time and the forward path of relays it traversed. An explicit route can be
-pinned with 'via':
+pinned with 'via' or --path, or let pathrank choose it with --path auto:
 
   sp trace 1a2b3c4d5e6f7a8b9c0d
   sp trace <dest> via <relay1> <relay2> <dest>
+  sp trace <dest> --path <relay1>,<relay2>
+  sp trace <dest> --path auto
+
+Node IDs may be given in full or as any unambiguous short prefix.
 
 Repeat like ping with -c/--count and -i/--interval (a count of 0 runs until
 interrupted):
@@ -37,12 +41,36 @@ trace requires a running daemon (the node performs the trace).`,
 		if cfg.NoDaemon {
 			return fmt.Errorf("trace requires the daemon; remove --no-daemon")
 		}
-		dest, route, err := parseTraceArgs(args)
+		dest, viaRoute, err := parseTraceArgs(args)
 		if err != nil {
 			return err
 		}
+		pathFlag, _ := cmd.Flags().GetStringSlice("path")
+		if len(pathFlag) > 0 && len(viaRoute) > 0 {
+			return fmt.Errorf("use either 'via <hops>' or --path, not both")
+		}
 		count, _ := cmd.Flags().GetInt("count")
 		interval, _ := cmd.Flags().GetDuration("interval")
+
+		// Resolve the destination (full id or short prefix) and the route. --path
+		// auto asks pathrank for the best route; otherwise an explicit relay list
+		// comes from --path or the positional 'via' hops. Empty => daemon selects.
+		rs := newResolver()
+		if dest, err = rs.resolve(dest); err != nil {
+			return err
+		}
+		var route []string
+		switch {
+		case isAutoPath(pathFlag):
+			route, err = rs.autoRoute(dest)
+		case len(pathFlag) > 0:
+			route, err = rs.resolveHops(pathFlag)
+		default:
+			route, err = rs.resolveHops(viaRoute)
+		}
+		if err != nil {
+			return err
+		}
 
 		client := api.NewClient(cfg.SockPath())
 		out := cmd.OutOrStdout()
@@ -206,5 +234,6 @@ func parseTraceArgs(args []string) (dest string, route []string, err error) {
 func init() {
 	traceCmd.Flags().IntP("count", "c", 1, "number of traces to send (0 = until interrupted)")
 	traceCmd.Flags().DurationP("interval", "i", time.Second, "wait between traces")
+	traceCmd.Flags().StringSlice("path", nil, "source route: comma-separated relay NodeIDs, or 'auto' to let pathrank pick the best route (alternative to 'via')")
 	rootCmd.AddCommand(traceCmd)
 }

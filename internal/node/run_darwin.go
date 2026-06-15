@@ -265,7 +265,7 @@ func (r *darwinRuntime) Peers() []api.Peer {
 			return
 		}
 		seen[id] = true
-		p := api.Peer{NodeID: id.String(), Hops: -1, LastAnnounceS: -1}
+		p := api.Peer{NodeID: id.String(), Hops: -1, LastAnnounceS: -1, LastRxS: -1}
 		if d, ok := dir[id]; ok {
 			p.Connected = true
 			p.Direction = d
@@ -273,6 +273,7 @@ func (r *darwinRuntime) Peers() []api.Peer {
 				p.TxPHY = nb.TxPHY.String()
 				p.RxPHY = nb.RxPHY.String()
 			}
+			p.RxPackets, p.TxPackets, p.LastRxS = packetStats(r.node, id)
 		}
 		// RSSI (dBm) is only known when a scan sampled it; 0 means unknown.
 		p.RSSI = r.node.RSSIFor(id)
@@ -329,10 +330,26 @@ func (r *darwinRuntime) Topology() api.TopologyResult {
 	nodes := make([]api.TopologyNode, 0)
 
 	// The local node never processes its own ANNOUNCE, so it is absent from the
-	// topology; add it explicitly with its current direct neighbors.
+	// topology; add it explicitly with its current direct neighbors, carrying the
+	// live link metrics (RSSI/PHY/direction/age) so route ranking can weigh them.
 	selfNbrs := make([]string, 0)
+	selfLinks := make([]api.NeighborDetail, 0)
 	for _, nb := range r.node.Neighbors() {
 		selfNbrs = append(selfNbrs, nb.ID.String())
+		var age uint32
+		if d := time.Since(nb.LastSeen); d > 0 {
+			age = uint32(d / time.Second)
+		}
+		selfLinks = append(selfLinks, api.NeighborDetail{
+			NodeID:    nb.ID.String(),
+			Name:      r.node.NameFor(nb.ID),
+			HasInfo:   true,
+			RSSI:      nb.RSSI,
+			TxPHY:     nb.TxPHY.String(),
+			RxPHY:     nb.RxPHY.String(),
+			Direction: directionString(nb.Direction),
+			AgeS:      age,
+		})
 	}
 	sort.Strings(selfNbrs)
 	nodes = append(nodes, api.TopologyNode{
@@ -340,6 +357,7 @@ func (r *darwinRuntime) Topology() api.TopologyResult {
 		Name:          r.node.Name(),
 		Self:          true,
 		Neighbors:     selfNbrs,
+		Links:         selfLinks,
 		LastAnnounceS: -1,
 	})
 
@@ -361,6 +379,7 @@ func (r *darwinRuntime) Topology() api.TopologyResult {
 			Name:          r.node.NameFor(tn.ID),
 			Connected:     connected[tn.ID],
 			Neighbors:     nbrs,
+			Links:         r.neighborDetails(tn),
 			LastAnnounceS: last,
 		})
 	}
@@ -434,7 +453,7 @@ func (r *darwinRuntime) Peer(idHex string) (*api.PeerDetail, error) {
 		return nil, fmt.Errorf("unknown node %s (no announce seen and not connected)", idHex)
 	}
 
-	p := api.Peer{NodeID: id.String(), Hops: -1, LastAnnounceS: -1}
+	p := api.Peer{NodeID: id.String(), Hops: -1, LastAnnounceS: -1, LastRxS: -1}
 	if dir != "" {
 		p.Connected = true
 		p.Direction = dir
@@ -442,6 +461,7 @@ func (r *darwinRuntime) Peer(idHex string) (*api.PeerDetail, error) {
 			p.TxPHY = nb.TxPHY.String()
 			p.RxPHY = nb.RxPHY.String()
 		}
+		p.RxPackets, p.TxPackets, p.LastRxS = packetStats(r.node, id)
 	}
 	p.RSSI = r.node.RSSIFor(id)
 	if route, ok := r.node.RouteTo(id); ok {
@@ -583,6 +603,17 @@ func (r *darwinRuntime) neighborDetails(tn core.TopoNode) []api.NeighborDetail {
 		out = append(out, api.NeighborDetail{NodeID: nid.String(), Name: nameOf(nid)})
 	}
 	return out
+}
+
+// packetStats reads a connected peer's lifetime RX/TX Sidepath-packet counts and
+// converts the last-receive timestamp to seconds-ago (-1 when nothing received).
+func packetStats(node *blenode.Node, id core.NodeID) (rx, tx uint64, lastRxS int64) {
+	rx, tx, lastRX := node.PacketStats(id)
+	lastRxS = int64(-1)
+	if !lastRX.IsZero() {
+		lastRxS = int64(time.Since(lastRX).Seconds())
+	}
+	return rx, tx, lastRxS
 }
 
 // directionString maps a wire connection direction to the same labels the peer

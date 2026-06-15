@@ -116,10 +116,17 @@ type Peer struct {
 	Direction string `json:"direction,omitempty"`
 	RSSI      int    `json:"rssi,omitempty"`
 	// TxPHY/RxPHY are the BLE PHY of the live link (e.g. "1M", "LE Coded").
-	TxPHY     string `json:"tx_phy,omitempty"`
-	RxPHY     string `json:"rx_phy,omitempty"`
-	Relay     bool   `json:"relay"`
-	Gateway   bool   `json:"gateway"`
+	TxPHY string `json:"tx_phy,omitempty"`
+	RxPHY string `json:"rx_phy,omitempty"`
+	// RxPackets/TxPackets count Sidepath packets (datagrams) received from / sent to
+	// this peer over the life of its link. Only populated for a connected peer.
+	RxPackets uint64 `json:"rx_packets,omitempty"`
+	TxPackets uint64 `json:"tx_packets,omitempty"`
+	// LastRxS is seconds since a packet was last received from this peer; -1 if
+	// none (or not connected).
+	LastRxS int64 `json:"last_rx_s"`
+	Relay   bool  `json:"relay"`
+	Gateway bool  `json:"gateway"`
 	Neighbors int    `json:"neighbors,omitempty"` // neighbor count from the node's announce
 	Hops      int    `json:"hops"`                // route to reach it: 0 = direct, N relays, -1 = no route
 	// AnnounceEpoch/AnnounceSeq identify the latest announce seen from this node.
@@ -181,6 +188,12 @@ type TopologyNode struct {
 	Self      bool     `json:"self,omitempty"`
 	Connected bool     `json:"connected,omitempty"`
 	Neighbors []string `json:"neighbors"` // neighbor NodeIDs (hex)
+	// Links carries the per-link details for this node's neighbors when known —
+	// the v3 ANNOUNCE info (§8.8) for remote nodes, or the live link table for the
+	// local node — so consumers like `sp path` can weigh edges by RSSI/PHY/age
+	// rather than hop count alone. It covers the same neighbors as Neighbors;
+	// entries with HasInfo false are IDs only (v1/v2 announce).
+	Links []NeighborDetail `json:"links,omitempty"`
 	// LastAnnounceS is seconds since this node's last announce; -1 for the local
 	// node and any node known only from a live link.
 	LastAnnounceS int64 `json:"last_announce_s"`
