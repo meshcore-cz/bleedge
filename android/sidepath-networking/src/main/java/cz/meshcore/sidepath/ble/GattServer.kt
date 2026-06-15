@@ -112,6 +112,9 @@ class SidepathGattServer(
         return enqueueNotify(device, frame)
     }
 
+    /** True while [device] is subscribed to PACKET_OUT, i.e. this inbound link can carry frames. */
+    fun isSubscribed(device: BluetoothDevice): Boolean = notifyDevices.contains(device)
+
     private fun enqueueNotify(device: BluetoothDevice, frame: ByteArray): Boolean {
         if (gattServer == null || !notifyDevices.contains(device)) return false
         synchronized(notifyLock) {
@@ -284,8 +287,16 @@ class SidepathGattServer(
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
             if (descriptor.uuid == SidepathUUIDs.CCCD) {
-                if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
-                    Log.i(TAG, "PACKET_OUT notifications enabled by ${device.address}")
+                // Peers subscribe with ENABLE_INDICATION_VALUE (0x0002) — PACKET_OUT is pushed as
+                // acknowledged indications (§4.4, sendNotify uses confirm=true). Accept either enable
+                // value so a notification-style subscriber still registers; only a disable (0x0000)
+                // unsubscribes. Checking solely for ENABLE_NOTIFICATION_VALUE rejected every real
+                // subscriber, leaving notifyDevices empty so we could never push back to a central
+                // that dialed us (lost ACKs, trace responses and direct replies over the inbound link).
+                val enable = value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) ||
+                    value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                if (enable) {
+                    Log.i(TAG, "PACKET_OUT indications enabled by ${device.address}")
                     if (!notifyDevices.contains(device)) notifyDevices.add(device)
                     clearNotifyState(device)
                 } else {

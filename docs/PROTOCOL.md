@@ -170,7 +170,18 @@ Whoever discovers a peer MAY connect. Because every node is dual-role (§4.0),
 either side of a pair may be the one that discovers and connects; the mesh does
 not rely on a fixed central/peripheral assignment between any two nodes.
 
-**Dedup before dialing.** A node MUST NOT open an outgoing connection to a peer it
+**Multiple links to one NodeID are allowed.** A node MAY hold more than one physical
+link to the same remote NodeID at once — typically an outgoing link it dialed plus an
+incoming link the peer dialed. All links to a NodeID are **equivalent transports**:
+routing selects a link by next-hop NodeID and MUST NOT depend on which physical link a
+packet arrived over, nor on there being exactly one link. A node sending to a NodeID
+picks any usable link and MAY fall back to another if it fails; flooding sends once per
+logical peer (NodeID), not once per physical link; and a duplicate datagram arriving
+over a second link is suppressed by datagram ID alone (§10.1). Consequently the dedup
+and collapse rules below are **optimizations that reduce redundant links, not
+correctness requirements** — a node that skips them still delivers messages correctly.
+
+**Dedup before dialing.** A node SHOULD NOT open an outgoing connection to a peer it
 already has a link to in either direction. Match on NodeID, not BLE address —
 peers rotate their address for privacy, so the same node reappears under new
 addresses. The advertised NodeID (§4.3) is the primary key, but it is not always
@@ -182,8 +193,10 @@ omits the NodeID — otherwise it repeatedly dials an already-connected peer, re
 appears as a flapping inbound link on the other side.
 
 **Collapse rule.** When both nodes of a pair connect to each other, the redundant
-pair MUST be collapsed to a single link, deterministically. Compare the two 10-byte
-NodeIDs as **unsigned** byte strings (lexicographic, most-significant byte first):
+pair SHOULD be collapsed to a single link, deterministically (an optimization — delivery
+does not depend on it, per *Multiple links to one NodeID are allowed* above). Compare
+the two 10-byte NodeIDs as **unsigned** byte strings (lexicographic, most-significant
+byte first):
 the node with the larger NodeID drops its *outgoing* link and keeps the *incoming*
 one; the node with the smaller NodeID keeps its outgoing link. The smaller node need
 not drop its incoming link — it goes away when the larger node drops its outgoing
@@ -1009,10 +1022,14 @@ A conforming implementation MUST:
   (CCCD `0x0002`);
 * [ ] send `PACKET_OUT` as ATT indications, awaiting each confirmation before the
   next frame to that peer;
-* [ ] dedup outgoing connections by NodeID rather than BLE address, including peers
-  whose advertisement omits the NodeID (learn it from `NODE_INFO`) (§4.4);
-* [ ] collapse mutual connections using an unsigned NodeID comparison — the larger
-  NodeID drops its outgoing link — re-evaluated whenever a link's peer NodeID
+* [ ] treat every physical link to a NodeID as an equivalent transport: route by
+  next-hop NodeID (never by BLE address or arrival link), pick any usable link to send
+  and fall back to another on failure, flood once per logical peer, and suppress
+  duplicates by datagram ID — so duplicate links never break delivery (§4.4);
+* [ ] (optimization) dedup outgoing connections by NodeID rather than BLE address,
+  including peers whose advertisement omits the NodeID (learn it from `NODE_INFO`) (§4.4);
+* [ ] (optimization) collapse mutual connections using an unsigned NodeID comparison —
+  the larger NodeID drops its outgoing link — re-evaluated whenever a link's peer NodeID
   becomes known (§4.4);
 * [ ] encode `NODE_INFO` as `version | public_key | provisional_caps`;
 * [ ] encode frame version `2` with a hop-local `transfer_id`;

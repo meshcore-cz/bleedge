@@ -209,6 +209,10 @@ class ProtocolTest {
         assertTrue(flood.datagram.path.contains(relay.localId))
         // a duplicate is dropped
         assertEquals(ActionType.DROP, relay.handle(dg, a.nodeId).single().type)
+        // §4.4 multi-link: the same datagram arriving over a *different* physical link (a different
+        // incoming peer) is still suppressed purely by datagram ID — dedup never keys on the link.
+        val otherLink = Identity.fromSeed(seed(99)).nodeId
+        assertEquals(ActionType.DROP, relay.handle(dg, otherLink).single().type)
     }
 
     @Test fun routerUnicastAckRequestedBuildsSourceRoutedAck() {

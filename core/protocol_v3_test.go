@@ -201,6 +201,39 @@ func TestPathRecordsRelaysOnly(t *testing.T) {
 	}
 }
 
+// §4.4 multi-link: a node may hold several physical links to the same NodeID. A duplicate datagram
+// arriving over a different link must be suppressed purely by datagram ID — dedup never keys on the
+// link it arrived over (task 8), so duplicate connections can never break delivery.
+func TestDuplicateDroppedRegardlessOfIncomingLink(t *testing.T) {
+	src := testNodeID(0x01)
+	linkA := testNodeID(0x02)
+	linkB := testNodeID(0x03)
+	r := NewRouter(testNodeID(0x09))
+
+	dg := Datagram{
+		Version: DatagramVersion, ID: NewDatagramID(), Source: src, Destination: BroadcastNodeID,
+		TTL: 4, Protocol: ProtocolSidepathChat, Payload: []byte("x"),
+	}
+	// First sighting over link A is accepted (delivered locally, since it's broadcast).
+	if acts := r.HandleDatagram(dg, &linkA); !hasAction(acts, ActionDeliverLocal) {
+		t.Fatalf("first sighting not delivered: %+v", acts)
+	}
+	// The same datagram arriving over a *different* link B is dropped as a duplicate.
+	acts := r.HandleDatagram(dg, &linkB)
+	if len(acts) != 1 || acts[0].Type != ActionDrop || acts[0].Reason != string(DropDuplicate) {
+		t.Fatalf("duplicate over second link not dropped: %+v", acts)
+	}
+}
+
+func hasAction(acts []Action, t ActionType) bool {
+	for _, a := range acts {
+		if a.Type == t {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBridgedBodyRoundTrip(t *testing.T) {
 	id := NewDatagramID()
 	bridge := NodeID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}

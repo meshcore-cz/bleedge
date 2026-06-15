@@ -321,6 +321,7 @@ func (n *Node) onPeerConnected(addr string, mtu int, nodeInfo []byte) {
 	}
 	n.peers[addr] = link
 	delete(n.connecting, addr)
+	n.logMultiLinkLocked()
 	n.mu.Unlock()
 	n.logf("connected peer=%s mtu=%d tx-phy=1M rx-phy=1M", peerID, mtu)
 
@@ -474,6 +475,7 @@ func (n *Node) learnNeighbor(dg core.Datagram, fromAddr string) {
 					}
 				}
 			}
+			n.logMultiLinkLocked()
 		}
 		n.mu.Unlock()
 		if dropOutbound != "" {
@@ -644,25 +646,7 @@ func (n *Node) relayFlood(a core.Action) {
 		return
 	}
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
-	n.mu.Lock()
-	links := make([]*MacPeerLink, 0, len(n.peers))
-	for addr, link := range n.peers {
-		if a.ExcludePeer != nil && link.peerID == *a.ExcludePeer {
-			continue // don't relay back to incoming peer
-		}
-		links = append(links, link)
-		_ = addr
-	}
-	subs := n.subscriberIDsLocked()
-	n.mu.Unlock()
-
-	for _, link := range links {
-		n.sendFramesToLink(link, frames)
-	}
-	// Also indicate to server-side subscribers (peers that connected TO us).
-	for _, cid := range subs {
-		n.notifyFrames(cid, frames)
-	}
+	n.floodFrames(frames, a.ExcludePeer)
 }
 
 func (n *Node) relayNextHop(a core.Action) {
@@ -674,7 +658,7 @@ func (n *Node) relayNextHop(a core.Action) {
 		return
 	}
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
-	if n.sendFramesToPeer(frames, *a.NextHop) {
+	if n.sendToNode(frames, *a.NextHop) {
 		return
 	}
 	n.logf("relay-next-hop: peer %s not connected", *a.NextHop)
@@ -704,19 +688,7 @@ func (n *Node) announceLoop(ctx context.Context) {
 			return
 		}
 		frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
-		n.mu.Lock()
-		links := make([]*MacPeerLink, 0, len(n.peers))
-		for _, link := range n.peers {
-			links = append(links, link)
-		}
-		subs := n.subscriberIDsLocked()
-		n.mu.Unlock()
-		for _, link := range links {
-			n.sendFramesToLink(link, frames)
-		}
-		for _, cid := range subs {
-			n.notifyFrames(cid, frames)
-		}
+		n.floodFrames(frames, nil)
 		n.logf("announce sent epoch=%d seq=%d neighbors=%d", n.announceEpoch, seq-1, len(n.router.Neighbors.IDs()))
 	}
 	send()
@@ -964,21 +936,7 @@ func (n *Node) transmitWithInfo(dg core.Datagram) (TransmitInfo, error) {
 	}
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
 	info := TransmitInfo{DatagramID: dg.ID, DatagramBytes: len(data), FragmentCount: len(frames)}
-	n.mu.Lock()
-	links := make([]*MacPeerLink, 0, len(n.peers))
-	for _, link := range n.peers {
-		links = append(links, link)
-	}
-	subs := n.subscriberIDsLocked()
-	n.mu.Unlock()
-
-	for _, link := range links {
-		n.sendFramesToLink(link, frames)
-	}
-	// Also indicate to server-side subscribers (peers that connected TO us).
-	for _, cid := range subs {
-		n.notifyFrames(cid, frames)
-	}
+	n.floodFrames(frames, nil)
 	return info, nil
 }
 
@@ -993,43 +951,135 @@ func (n *Node) transmitToRoute(dg core.Datagram) error {
 	}
 	frames := core.FragmentDatagramNew(data, core.MaxFrameSize)
 	firstHop := dg.Route[0]
-	if n.sendFramesToPeer(frames, firstHop) {
+	if n.sendToNode(frames, firstHop) {
 		return nil
 	}
 	return fmt.Errorf("first hop %s not connected", firstHop)
 }
 
-func (n *Node) sendFramesToPeer(frames []core.Frame, peer core.NodeID) bool {
-	n.mu.Lock()
-	for _, link := range n.peers {
-		if link.peerID == peer {
-			n.mu.Unlock()
-			n.sendFramesToLink(link, frames)
-			return true
-		}
-	}
-	for addr, peerID := range n.serverPeerIDs {
-		if peerID != peer {
-			continue
-		}
-		if !n.subscribers[addr] {
-			continue
-		}
-		n.mu.Unlock()
-		n.notifyFrames(addr, frames)
-		return true
-	}
-	n.mu.Unlock()
-	return false
+// linkRef is one physical BLE link to a remote node: an outbound connection we dialed (outbound set)
+// or an inbound subscriber that dialed us (centralID set). Sidepath (§4.4) treats every link to the
+// same NodeID as an equivalent transport, so routing selects a link by NodeID and never depends on
+// which one a packet arrived over. Collapsing a redundant inbound/outbound pair is an optimization,
+// not a correctness requirement.
+type linkRef struct {
+	nodeID    core.NodeID  // zero when not yet learned (cannot be deduped by identity)
+	outbound  *MacPeerLink // non-nil for an outbound link
+	centralID string       // non-empty for an inbound (subscriber) link
 }
 
-// subscriberIDsLocked snapshots the subscribed central ids. Caller must hold n.mu.
-func (n *Node) subscriberIDsLocked() []string {
-	ids := make([]string, 0, len(n.subscribers))
-	for cid := range n.subscribers {
-		ids = append(ids, cid)
+// sendLink writes frames over a single physical link. Sends are fire-and-forget — failures surface
+// asynchronously as disconnects, which prune the link so a later send naturally picks a backup.
+func (n *Node) sendLink(ref linkRef, frames []core.Frame) {
+	if ref.outbound != nil {
+		n.sendFramesToLink(ref.outbound, frames)
+	} else {
+		n.notifyFrames(ref.centralID, frames)
 	}
-	return ids
+}
+
+// linksToLocked snapshots every usable link to peer, outbound first (preferred) then inbound
+// (backup). Caller holds n.mu.
+func (n *Node) linksToLocked(peer core.NodeID) []linkRef {
+	var refs []linkRef
+	for _, l := range n.peers {
+		if l.peerID == peer {
+			refs = append(refs, linkRef{nodeID: peer, outbound: l})
+		}
+	}
+	for cid, pid := range n.serverPeerIDs {
+		if pid == peer && n.subscribers[cid] {
+			refs = append(refs, linkRef{nodeID: peer, centralID: cid})
+		}
+	}
+	return refs
+}
+
+// sendToNode routes frames to peer over any usable link, preferring the first (tasks 4, 5). Because
+// sends are fire-and-forget the "retry" is link selection: a vanished outbound or unsubscribed inbound
+// is pruned by the disconnect path, so the next call falls through to a live backup. Re-delivery over
+// a different link is safe — relays and the recipient dedup on datagram ID (task 8).
+func (n *Node) sendToNode(frames []core.Frame, peer core.NodeID) bool {
+	n.mu.Lock()
+	links := n.linksToLocked(peer)
+	n.mu.Unlock()
+	if len(links) == 0 {
+		return false
+	}
+	n.sendLink(links[0], frames)
+	return true
+}
+
+// logicalPeerLinksLocked returns one link per logical peer (distinct NodeID) for flooding, so a node
+// reachable over both an inbound and an outbound link is flooded once, not once per physical link
+// (task 7). Links whose NodeID is not yet known are each their own logical peer — we cannot dedup
+// them, but we must still reach them. Caller holds n.mu.
+func (n *Node) logicalPeerLinksLocked() []linkRef {
+	var zero core.NodeID
+	seen := make(map[core.NodeID]bool)
+	var refs []linkRef
+	for _, l := range n.peers {
+		if l.peerID == zero {
+			refs = append(refs, linkRef{outbound: l})
+			continue
+		}
+		if seen[l.peerID] {
+			continue
+		}
+		seen[l.peerID] = true
+		refs = append(refs, linkRef{nodeID: l.peerID, outbound: l})
+	}
+	for cid := range n.subscribers {
+		pid, known := n.serverPeerIDs[cid]
+		if !known || pid == zero {
+			refs = append(refs, linkRef{centralID: cid}) // NodeID unknown — reach it individually
+			continue
+		}
+		if seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		refs = append(refs, linkRef{nodeID: pid, centralID: cid})
+	}
+	return refs
+}
+
+// logMultiLinkLocked logs any NodeID currently reached over more than one physical link (an outbound
+// we dialed plus an inbound it dialed). Debug visibility for §4.4 multi-link handling (task 11):
+// messages keep flowing in this state because routing selects a link by NodeID — see sendToNode.
+// Caller holds n.mu.
+func (n *Node) logMultiLinkLocked() {
+	var zero core.NodeID
+	dirs := make(map[core.NodeID][]string)
+	for addr, l := range n.peers {
+		if l.peerID != zero {
+			dirs[l.peerID] = append(dirs[l.peerID], "out:"+addr)
+		}
+	}
+	for cid, pid := range n.serverPeerIDs {
+		if pid != zero && n.subscribers[cid] {
+			dirs[pid] = append(dirs[pid], "in:"+cid)
+		}
+	}
+	for id, links := range dirs {
+		if len(links) > 1 {
+			n.logf("multi-link peer=%s links=%v (routing by NodeID, delivery unaffected)", id, links)
+		}
+	}
+}
+
+// floodFrames sends frames to every logical peer once, skipping exclude (split horizon, §10.2.5).
+func (n *Node) floodFrames(frames []core.Frame, exclude *core.NodeID) {
+	n.mu.Lock()
+	refs := n.logicalPeerLinksLocked()
+	n.mu.Unlock()
+	var zero core.NodeID
+	for _, ref := range refs {
+		if exclude != nil && ref.nodeID != zero && ref.nodeID == *exclude {
+			continue
+		}
+		n.sendLink(ref, frames)
+	}
 }
 
 // sendFramesToLink writes frames to a connected peer (central role) via the helper. Multi-fragment

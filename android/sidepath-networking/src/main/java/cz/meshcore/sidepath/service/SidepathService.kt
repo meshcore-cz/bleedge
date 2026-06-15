@@ -98,11 +98,17 @@ data class PeerInfo(
     val txPhy: PHY,
     val rxPhy: PHY,
     val caps: Capabilities,
-    val incoming: Boolean = false,
+    val incoming: Boolean = false,    // reached only via an inbound link (kept for back-compat: inbound && !outbound)
     val degraded: Boolean = false,
     val name: String = "",
     val publicKey: ByteArray = ByteArray(0),
-    val connectedSinceMs: Long = 0L, // when this peer first appeared connected (for an uptime label)
+    val connectedSinceMs: Long = 0L,  // when this peer first appeared connected (for an uptime label)
+    // §4.4 multi-link: a peer may be reached over both an inbound link (it dialed us) and an outbound
+    // link (we dialed it) at once. These flags expose each direction independently, and [linkCount] is
+    // the number of usable physical links — so a redundant in+out pair can be surfaced as "in+out".
+    val outbound: Boolean = false,
+    val inbound: Boolean = false,
+    val linkCount: Int = 1,
 )
 
 /**
@@ -1300,56 +1306,129 @@ class SidepathService : Service() {
 
     private fun framesFor(dg: Datagram): List<Frame> = Frame.fragment(dg.encode(), Sidepath.MAX_FRAME_SIZE)
 
-    private fun sendFramesToAll(frames: List<Frame>, exclude: NodeId? = null) {
-        for ((addrHex, link) in peers) {
-            if (link.peerId != null && link.peerId == exclude) continue
-            if (!link.isUsable) {
-                continue
-            }
-            for (f in frames) {
-                if (!link.sendFrame(f.encode())) {
-                    removePeerLink(addrHex, link, "send rejected")
-                    break
-                }
-            }
-        }
-        val server = bleGattServer ?: return
-        for ((addrHex, nid) in serverPeers) {
-            if (nid == null || nid == exclude) continue
-            val device = serverPeerDevices[addrHex] ?: continue
-            for (f in frames) {
-                if (!server.notifyFrameTo(f.encode(), device)) {
-                    removeServerPeer(device, "notify failed")
-                    break
-                }
-            }
-        }
+    /**
+     * One physical BLE link to a remote node. A node may hold several links to the same NodeID
+     * (an outbound link we dialed plus an inbound link it dialed) — Sidepath (§4.4) treats them as
+     * equivalent transports keyed by NodeID, so routing never depends on which one a packet arrived
+     * on. Collapse of the redundant pair is an optimization, not a correctness requirement.
+     */
+    private interface Link {
+        val nodeId: NodeId?
+        val isUsable: Boolean
+        val label: String
+        fun send(frame: ByteArray): Boolean
+        /** Tear down this link after an unrecoverable send failure. */
+        fun drop(reason: String)
     }
 
-    private fun sendFramesToPeer(frames: List<Frame>, nodeId: NodeId): Boolean {
-        peers.entries.firstOrNull { it.value.peerId == nodeId }?.let { (addrHex, link) ->
-            if (!link.isUsable) {
-                log("send-to-peer: peer ${nodeId.toHex()} not ready addr=$addrHex", LogTag.ROUTER)
-                return false
-            }
-            for (f in frames) {
-                if (!link.sendFrame(f.encode())) {
-                    removePeerLink(addrHex, link, "send rejected")
-                    return false
-                }
-            }
-            return true
+    private inner class OutboundLink(val addrHex: String, val link: BLEPeerLink) : Link {
+        override val nodeId get() = link.peerId
+        override val isUsable get() = link.isUsable
+        override val label get() = "out:$addrHex"
+        override fun send(frame: ByteArray) = link.sendFrame(frame)
+        override fun drop(reason: String) = removePeerLink(addrHex, link, reason)
+    }
+
+    private inner class InboundLink(
+        val addrHex: String,
+        val device: BluetoothDevice,
+        val server: SidepathGattServer,
+        override val nodeId: NodeId?,
+    ) : Link {
+        override val isUsable get() = server.isSubscribed(device)
+        override val label get() = "in:$addrHex"
+        override fun send(frame: ByteArray) = server.notifyFrameTo(frame, device)
+        override fun drop(reason: String) = removeServerPeer(device, reason)
+    }
+
+    /**
+     * All usable physical links to [nodeId], outbound first. The first entry is the preferred link;
+     * the rest are live backups [sendToNode] falls back to when the preferred link fails.
+     */
+    private fun linksTo(nodeId: NodeId): List<Link> {
+        val out = peers.entries
+            .filter { it.value.peerId == nodeId && it.value.isUsable }
+            .map { OutboundLink(it.key, it.value) }
+        val server = bleGattServer
+        val inb = if (server == null) emptyList() else serverPeers.entries
+            .filter { it.value == nodeId }
+            .mapNotNull { e -> serverPeerDevices[e.key]?.let { InboundLink(e.key, it, server, nodeId) } }
+            .filter { it.isUsable }
+        return out + inb
+    }
+
+    /**
+     * One link per logical peer (distinct NodeID), used for flooding so a node reachable over both an
+     * inbound and an outbound link receives a flood once, not once per physical link (§4.4, task 7).
+     * Links whose NodeID is not yet known are each treated as their own logical peer (we cannot dedup
+     * them, but we must still reach them).
+     */
+    private fun logicalPeerLinks(): List<Link> {
+        val byNode = LinkedHashMap<NodeId, Link>()
+        val unknown = mutableListOf<Link>()
+        val server = bleGattServer
+        for ((addrHex, link) in peers) {
+            if (!link.isUsable) continue
+            val nid = link.peerId
+            if (nid == null) unknown += OutboundLink(addrHex, link)
+            else byNode.putIfAbsent(nid, OutboundLink(addrHex, link))
         }
-        val server = bleGattServer ?: return false
-        val entry = serverPeers.entries.firstOrNull { it.value == nodeId } ?: return false
-        val device = serverPeerDevices[entry.key] ?: return false
+        if (server != null) {
+            for ((addrHex, nid) in serverPeers) {
+                val device = serverPeerDevices[addrHex] ?: continue
+                val link = InboundLink(addrHex, device, server, nid)
+                if (!link.isUsable) continue
+                if (nid == null) unknown += link
+                else byNode.putIfAbsent(nid, link)
+            }
+        }
+        return byNode.values + unknown
+    }
+
+    /** Sends every frame over [link]; on the first rejected frame drops the link and returns false. */
+    private fun sendFramesOver(link: Link, frames: List<ByteArray>): Boolean {
         for (f in frames) {
-            if (!server.notifyFrameTo(f.encode(), device)) {
-                removeServerPeer(device, "notify failed")
+            if (!link.send(f)) {
+                link.drop("send rejected")
                 return false
             }
         }
         return true
+    }
+
+    /**
+     * Routes [frames] to [nodeId] over any usable link, preferring the first and retrying the
+     * remaining live links if it fails (tasks 4, 5). Re-sending over a backup is safe: relays and the
+     * recipient dedup on datagram ID, so a duplicate frame is suppressed (task 8). Returns false only
+     * when no link succeeds.
+     */
+    private fun sendToNode(nodeId: NodeId, frames: List<Frame>): Boolean {
+        val links = linksTo(nodeId)
+        if (links.isEmpty()) {
+            log("send-to-node: peer ${nodeId.toHex()} not connected", LogTag.ROUTER)
+            return false
+        }
+        val encoded = frames.map { it.encode() }
+        for (link in links) {
+            if (sendFramesOver(link, encoded)) return true
+            log("send-to-node: link ${link.label} to ${nodeId.toHex()} failed — trying backup", LogTag.ROUTER)
+        }
+        return false
+    }
+
+    private fun sendFramesToAll(frames: List<Frame>, exclude: NodeId? = null) {
+        val encoded = frames.map { it.encode() }
+        // One transmission per logical peer (distinct NodeID), so a node reachable over both an inbound
+        // and an outbound link is flooded once, not twice (task 7). Known peers route through
+        // [sendToNode] for backup-link fallback; links whose NodeID we don't know yet are sent directly.
+        for (link in logicalPeerLinks()) {
+            val nid = link.nodeId
+            when {
+                nid == null -> sendFramesOver(link, encoded)
+                nid == exclude -> continue
+                else -> sendToNode(nid, frames)
+            }
+        }
     }
 
     private fun relayFlood(action: Action) {
@@ -1359,7 +1438,7 @@ class SidepathService : Service() {
 
     private fun relayNextHop(action: Action) {
         val nh = action.nextHop ?: return
-        if (!sendFramesToPeer(framesFor(action.datagram), nh)) {
+        if (!sendToNode(nh, framesFor(action.datagram))) {
             log("relay-next-hop: peer ${nh.toHex()} not connected — dropping", LogTag.ROUTER)
         }
     }
@@ -1367,13 +1446,13 @@ class SidepathService : Service() {
     private fun sendBuiltAck(action: Action) {
         val nh = action.nextHop ?: return
         val frames = framesFor(action.datagram)
-        if (!sendFramesToPeer(frames, nh)) sendFramesToAll(frames)
+        if (!sendToNode(nh, frames)) sendFramesToAll(frames)
         _stats.update { it.copy(acksSent = it.acksSent + 1) }
     }
 
     private fun transmitToFirstHop(dg: Datagram) {
         val firstHop = dg.route.firstOrNull() ?: return
-        if (!sendFramesToPeer(framesFor(dg), firstHop)) {
+        if (!sendToNode(firstHop, framesFor(dg))) {
             log("source-route: first hop ${firstHop.toHex()} not connected — dropping", LogTag.ROUTER)
         }
     }
@@ -1654,36 +1733,97 @@ class SidepathService : Service() {
 
     // ---- state helpers -------------------------------------------------------
 
+    /** Per-NodeID accumulation of every physical link, so one peer = one row tagged with both directions. */
+    private class PeerAgg {
+        var outboundUsable = false
+        var outboundDegraded = false
+        var inbound = false
+        var usableLinks = 0
+        var rssi = RSSI_UNKNOWN
+        var txPhy = PHY.UNKNOWN
+        var rxPhy = PHY.UNKNOWN
+        var caps: Capabilities = Capabilities(0)
+        var publicKey: ByteArray = ByteArray(0)
+    }
+
     private fun updatePeersState() {
-        val seen = mutableSetOf<String>()
-        val list = mutableListOf<PeerInfo>()
         val now = System.currentTimeMillis()
         fun since(hex: String): Long = connectedSince.getOrPut(hex) { now }
+
+        // Merge every physical link by NodeID. A peer reached over both an inbound and an outbound link
+        // (§4.4) collapses to a single row carrying both directions and the usable-link count, instead
+        // of the previous outbound-wins dedup that hid the inbound entirely.
+        val agg = LinkedHashMap<NodeId, PeerAgg>()
         for (link in peers.values) {
             val pid = link.peerId ?: continue
-            if (!link.isUsable) {
-                if (!seen.add(pid.toHex())) continue
-                router.neighbors.remove(pid)
-                list += PeerInfo(pid, link.rssi, link.txPhy, link.rxPhy, link.caps, degraded = true,
-                    name = router.nameFor(pid), publicKey = link.publicKey, connectedSinceMs = since(pid.toHex()))
-                continue
+            val a = agg.getOrPut(pid) { PeerAgg() }
+            if (link.isUsable) {
+                a.outboundUsable = true
+                a.usableLinks++
+                a.rssi = link.rssi; a.txPhy = link.txPhy; a.rxPhy = link.rxPhy
+                a.caps = link.caps; a.publicKey = link.publicKey
+            } else {
+                a.outboundDegraded = true
             }
-            if (!seen.add(pid.toHex())) continue
-            router.neighbors.upsert(ProtoNeighbor(id = pid, publicKey = link.publicKey, rssi = link.rssi, provisionalCaps = link.caps))
-            list += PeerInfo(pid, link.rssi, link.txPhy, link.rxPhy, link.caps, name = router.nameFor(pid),
-                publicKey = link.publicKey, connectedSinceMs = since(pid.toHex()))
         }
-        for (nid in serverPeers.values) {
+        for ((addrHex, nid) in serverPeers) {
             if (nid == null || nid.isBroadcast()) continue
-            if (!seen.add(nid.toHex())) continue
-            val nb = router.neighbors.get(nid)
-            val caps = nb?.provisionalCaps ?: router.topology.getNode(nid)?.caps ?: Capabilities(0)
-            list += PeerInfo(nid, nb?.rssi ?: RSSI_UNKNOWN, PHY.UNKNOWN, PHY.UNKNOWN, caps, incoming = true,
-                name = router.nameFor(nid), publicKey = router.publicKeyFor(nid) ?: ByteArray(0),
-                connectedSinceMs = since(nid.toHex()))
+            val device = serverPeerDevices[addrHex] ?: continue
+            if (bleGattServer?.isSubscribed(device) != true) continue
+            val a = agg.getOrPut(nid) { PeerAgg() }
+            a.inbound = true
+            a.usableLinks++
+            if (a.publicKey.isEmpty()) a.publicKey = router.publicKeyFor(nid) ?: ByteArray(0)
+            if (a.caps == Capabilities(0)) {
+                val nb = router.neighbors.get(nid)
+                a.caps = nb?.provisionalCaps ?: router.topology.getNode(nid)?.caps ?: Capabilities(0)
+                if (a.rssi == RSSI_UNKNOWN) a.rssi = nb?.rssi ?: RSSI_UNKNOWN
+            }
         }
-        connectedSince.keys.retainAll(seen)
+
+        val list = agg.map { (pid, a) ->
+            // Keep the neighbor table in sync: a peer reachable over any usable link is a routable
+            // neighbor; one left with only a dead outbound (no inbound) is pruned.
+            val degraded = !a.outboundUsable && !a.inbound
+            if (a.outboundUsable) {
+                router.neighbors.upsert(ProtoNeighbor(id = pid, publicKey = a.publicKey, rssi = a.rssi, provisionalCaps = a.caps))
+            } else if (degraded) {
+                router.neighbors.remove(pid)
+            }
+            PeerInfo(
+                nodeId = pid, rssi = a.rssi, txPhy = a.txPhy, rxPhy = a.rxPhy, caps = a.caps,
+                incoming = a.inbound && !a.outboundUsable, degraded = degraded,
+                name = router.nameFor(pid), publicKey = a.publicKey, connectedSinceMs = since(pid.toHex()),
+                outbound = a.outboundUsable, inbound = a.inbound, linkCount = a.usableLinks.coerceAtLeast(1),
+            )
+        }
+        connectedSince.keys.retainAll(agg.keys.mapTo(mutableSetOf()) { it.toHex() })
         _connectedPeers.value = list
+        logMultiLinkPeers()
+    }
+
+    /**
+     * Debug visibility for §4.4 multi-link handling (task 11): logs any NodeID we currently reach over
+     * more than one physical link (e.g. an outbound we dialed plus an inbound it dialed). Messages keep
+     * flowing in this state because routing picks any usable link by NodeID — see [sendToNode].
+     */
+    private fun logMultiLinkPeers() {
+        val dirs = HashMap<NodeId, MutableList<String>>()
+        for ((addrHex, link) in peers) {
+            val pid = link.peerId ?: continue
+            if (link.isUsable) dirs.getOrPut(pid) { mutableListOf() }.add("out:$addrHex")
+        }
+        for ((addrHex, nid) in serverPeers) {
+            if (nid == null) continue
+            if (bleGattServer?.isSubscribed(serverPeerDevices[addrHex] ?: continue) == true) {
+                dirs.getOrPut(nid) { mutableListOf() }.add("in:$addrHex")
+            }
+        }
+        for ((nid, links) in dirs) {
+            if (links.size > 1) {
+                log("multi-link peer=${nid.toHex()} links=${links.joinToString(",")} (routing by NodeID, delivery unaffected)", LogTag.PEER)
+            }
+        }
     }
 
     private fun refreshTopologyState() {
