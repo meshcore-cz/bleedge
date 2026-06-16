@@ -1358,16 +1358,9 @@ class SidepathService : Service() {
             else -> null
         }?.copy(rssi = rxRssi) ?: return
         appendMessage(msg)
-        maybeNotify(msg)
-    }
-
-    private fun maybeNotify(msg: ReceivedMessage) {
-        val text = msg.text ?: return
-        if (msg.isTyping) return
-        val peerHex = msg.fromNodeId.toHex()
-        if (MessageNotifier.isConversationActive(peerHex)) return
-        val sender = peerHex.take(8)
-        MessageNotifier.show(this, "Meshward · $sender", text, sender.hashCode())
+        // Chat notifications are posted by the app (cz.meshcore.meshward.notify.MeshwardNotifier),
+        // which has the names, channel identities, mute settings and avatars the service lacks. The
+        // service only surfaces the decrypted message; it no longer posts its own bare notification.
     }
 
     // ---- trace ---------------------------------------------------------------
@@ -2002,6 +1995,13 @@ class SidepathService : Service() {
         // Atomic CAS update: appendMessage runs from concurrent receive paths, so a plain
         // read-modify-write of .value could drop a frame that arrived between the two.
         _receivedMessages.update { (it + msg).takeLast(200) }
+        // Forward every received message to the host app's notification hook. The app decides what (if
+        // anything) to post; this is the only path that keeps working when the app UI is gone, so chat
+        // notifications still fire while the app is task-killed but the foreground service lives on.
+        // Skip our own messages heard back across the mesh (we never notify ourselves).
+        if (msg.fromNodeId != _nodeId.value) {
+            runCatching { IncomingMessageBridge.listener?.onIncoming(msg) }
+        }
     }
 
     private fun log(msg: String, tag: LogTag = LogTag.SYS) {
