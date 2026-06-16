@@ -91,6 +91,14 @@ final class Helper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDeleg
     private var niChars: [String: CBCharacteristic] = [:] // addr -> NODE_INFO (pending read)
     private var pendingWriteStarts: [String: [Date]] = [:] // addr -> reliable PACKET_IN writes
 
+    private let maxCentralConnections = 6
+    private let connectTimeout: TimeInterval = 12
+    private let connectBackoff: TimeInterval = 30
+    private var connecting: Set<String> = []
+    private var connectStartedAt: [String: Date] = [:]
+    private var failedUntil: [String: Date] = [:]
+    private var lastScanEmit: [String: Date] = [:]
+
     // Peripheral state: centrals subscribed to our PACKET_OUT.
     private var subscribers: [String: CBCentral] = [:]
     // Single global outbound queue for indications (CoreBluetooth's tx queue is global).
@@ -178,15 +186,31 @@ final class Helper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDeleg
     // MARK: Central role
 
     private func connect(_ addr: String) {
+        if connected[addr] != nil || connecting.contains(addr) {
+            return
+        }
+        if let until = failedUntil[addr], until > Date() {
+            io.send(["type": "peer_failed", "addr": addr, "error": "connect backoff"])
+            return
+        }
+        if connected.count + connecting.count >= maxCentralConnections {
+            io.send(["type": "peer_failed", "addr": addr, "error": "connection budget full"])
+            return
+        }
         guard let p = discovered[addr] else {
             io.send(["type": "peer_failed", "addr": addr, "error": "unknown peripheral"])
             return
         }
+        connecting.insert(addr)
+        connectStartedAt[addr] = Date()
         p.delegate = self
         central.connect(p, options: nil)
+        scheduleConnectTimeout(for: p)
     }
 
     private func disconnect(_ addr: String) {
+        connecting.remove(addr)
+        connectStartedAt.removeValue(forKey: addr)
         if let p = connected[addr] ?? discovered[addr] {
             central.cancelPeripheralConnection(p)
         }
@@ -208,20 +232,39 @@ final class Helper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDeleg
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let addr = p.identifier.uuidString
         discovered[addr] = p
+        let now = Date()
+        if let until = failedUntil[addr], until > now {
+            return
+        }
+        if let last = lastScanEmit[addr], now.timeIntervalSince(last) < 2.0 {
+            return
+        }
+        lastScanEmit[addr] = now
         io.send(["type": "scan", "addr": addr, "rssi": RSSI.intValue])
     }
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
-        connected[p.identifier.uuidString] = p
+        let addr = p.identifier.uuidString
+        connecting.remove(addr)
+        connectStartedAt.removeValue(forKey: addr)
+        failedUntil.removeValue(forKey: addr)
+        connected[addr] = p
         p.discoverServices([serviceUUID])
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
-        io.send(["type": "peer_failed", "addr": p.identifier.uuidString, "error": error?.localizedDescription ?? "connect failed"])
+        let addr = p.identifier.uuidString
+        let wasConnecting = connecting.remove(addr) != nil
+        connectStartedAt.removeValue(forKey: addr)
+        failedUntil[addr] = Date().addingTimeInterval(connectBackoff)
+        guard wasConnecting else { return }
+        io.send(["type": "peer_failed", "addr": addr, "error": error?.localizedDescription ?? "connect failed"])
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         let addr = p.identifier.uuidString
+        connecting.remove(addr)
+        connectStartedAt.removeValue(forKey: addr)
         connected.removeValue(forKey: addr)
         piChars.removeValue(forKey: addr)
         poChars.removeValue(forKey: addr)
@@ -300,6 +343,19 @@ final class Helper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDeleg
     private func emitPeerConnected(_ p: CBPeripheral, nodeInfo: Data) {
         let mtu = p.maximumWriteValueLength(for: .withResponse)
         io.send(["type": "peer_connected", "addr": p.identifier.uuidString, "mtu": mtu], payload: nodeInfo)
+    }
+
+    private func scheduleConnectTimeout(for p: CBPeripheral) {
+        queue.asyncAfter(deadline: .now() + connectTimeout) { [weak self, weak p] in
+            guard let self, let p else { return }
+            let addr = p.identifier.uuidString
+            guard self.connecting.contains(addr) else { return }
+            self.connecting.remove(addr)
+            self.connectStartedAt.removeValue(forKey: addr)
+            self.failedUntil[addr] = Date().addingTimeInterval(self.connectBackoff)
+            self.central.cancelPeripheralConnection(p)
+            self.io.send(["type": "peer_failed", "addr": addr, "error": "connect timeout"])
+        }
     }
 
     // MARK: Peripheral role
