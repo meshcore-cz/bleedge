@@ -121,7 +121,8 @@ func Start(ctx context.Context, id *core.Identity, cfg *config.Config, nc config
 					injected, err := br.BridgeRawOut(ctx, raw)
 					switch {
 					case err != nil:
-						outLog(fmt.Sprintf("meshcore bridge: raw out FAILED from=%s: %v", src, err))
+						outLog(fmt.Sprintf("meshcore bridge: raw out FAILED from=%s: %v bytes=%d packet=%s",
+							src, err, len(raw), hex.EncodeToString(raw)))
 					case injected:
 						outLog(fmt.Sprintf("meshcore bridge: raw out from=%s -> MeshCore bytes=%d", src, len(raw)))
 					}

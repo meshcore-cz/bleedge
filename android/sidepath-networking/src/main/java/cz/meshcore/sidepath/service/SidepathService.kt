@@ -75,6 +75,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 private const val TAG = "SidepathService"
+// MeshCore GRP_DATA application data-type for Outpost frames: ASCII "OP" (0x504F), per the Outpost
+// spec §5.3. A group datagram tagged with it carries an opaque Outpost object/sync frame.
+private const val OUTPOST_GRP_DATA_TYPE = 0x504F
 private const val NOTIFICATION_CHANNEL = "sidepath"
 private const val NOTIFICATION_ID = 1
 private const val EPOCH_PREFS = "sidepath_node"
@@ -162,6 +165,10 @@ data class ReceivedMessage(
     // Raw inner MeshCore OTA packet bytes (set when fromMeshCore), persisted so the message's
     // "Examine" / MeshCore packet details survive the packet ageing out of the Rx Log or a restart.
     val meshCorePacketRaw: ByteArray? = null,
+    // Outpost frame bytes (a signed object or a sync control frame) carried either as a native
+    // Sidepath OUTPOST datagram or inside a MeshCore GRP_DATA group datagram. The app verifies and
+    // stores these; the service treats them as opaque.
+    val outpostPayload: ByteArray? = null,
 )
 
 /** A decoded datagram captured for the Rx Log. */
@@ -1001,6 +1008,7 @@ class SidepathService : Service() {
             PayloadProtocol.SIDEPATH_CHAT -> deliverChat(dg, rxRssi)
             // MeshCore packets are handled (deduped) in handleMeshCorePacket from the receive path.
             PayloadProtocol.MESHCORE_PACKET -> Unit
+            PayloadProtocol.OUTPOST -> deliverOutpost(dg, rxRssi)
             else -> appendMessage(ReceivedMessage(dg.source, dg.id, dg.protocol, path = dg.path))
         }
     }
@@ -1118,6 +1126,25 @@ class SidepathService : Service() {
                     else m + (payloadHex to (prev + sample).takeLast(200))
                 }
                 }
+            }
+        }
+
+        // MeshCore group datagram (GRP_DATA): an Outpost object/sync frame published on a board
+        // channel. Decrypt with each joined channel secret; an Outpost data_type (0x504F = "OP")
+        // surfaces the inner frame to the app for verification, exactly like the Sidepath path.
+        if (firstSight && env != null && env.type == MeshCoreType.GRP_DATA && env.payload.isNotEmpty()) {
+            for (secret in meshCoreChannelSecrets) {
+                val gd = MeshCoreCodec.decodeGrpData(secret, env.payload) ?: continue
+                if (gd.dataType == OUTPOST_GRP_DATA_TYPE && gd.data.isNotEmpty()) {
+                    appendMessage(
+                        ReceivedMessage(
+                            dg.source, dg.id, dg.protocol,
+                            outpostPayload = gd.data, path = dg.path, fromMeshCore = true,
+                            meshCorePacketId = contentId, meshCoreNetworkCode = bridgedNetworkCode, rssi = rssi,
+                        ),
+                    )
+                }
+                break
             }
         }
 
@@ -1438,6 +1465,13 @@ class SidepathService : Service() {
         // service only surfaces the decrypted message; it no longer posts its own bare notification.
     }
 
+    /** Surfaces a native Sidepath OUTPOST datagram's opaque payload to the app for verification. */
+    private fun deliverOutpost(dg: Datagram, rxRssi: Int = RSSI_UNKNOWN) {
+        appendMessage(
+            ReceivedMessage(dg.source, dg.id, dg.protocol, outpostPayload = dg.payload, path = dg.path, rssi = rxRssi),
+        )
+    }
+
     // ---- trace ---------------------------------------------------------------
 
     private fun respondToTrace(req: Datagram, ctrl: ControlMessage) {
@@ -1660,7 +1694,40 @@ class SidepathService : Service() {
         sendFramesToAll(framesFor(dg))
     }
 
+    /**
+     * Re-transmits a previously-originated datagram verbatim — identical id, bytes and signatures — so
+     * peers that missed it the first time can still receive it (the chat "Rebroadcast" action). Peers
+     * that already have it dedup it away. Returns true if [rawDatagram] decoded and was sent.
+     */
+    fun rebroadcast(rawDatagram: ByteArray): Boolean {
+        if (!::router.isInitialized) return false
+        val dg = runCatching { Datagram.decode(rawDatagram) }.getOrNull() ?: return false
+        router.markOriginated(dg.id)
+        transmit(dg, trackFloodRepeat = !dg.isSourceRouted)
+        // A MeshCore-carrying datagram must also go back onto a locally-attached radio.
+        if (dg.protocol == PayloadProtocol.MESHCORE_PACKET) {
+            meshCoreRadioSink?.invoke(MeshCoreCarrier.unframe(dg.payload).raw)
+        }
+        return true
+    }
+
     // ---- public send API -----------------------------------------------------
+
+    /**
+     * Broadcasts an Outpost frame (a signed object or a sync control frame) as a flooded OUTPOST
+     * datagram so nearby Meshward peers receive it over plain Sidepath. The bytes are opaque to the
+     * service; receivers verify and store them. Returns the originated datagram id.
+     */
+    fun sendOutpost(payload: ByteArray, floodTtl: Int = Sidepath.DEFAULT_FLOOD_TTL): ByteArray? {
+        val id = identity ?: return null
+        val dg = Datagram(
+            id = Datagram.newDatagramId(), source = id.nodeId, destination = NodeId.BROADCAST,
+            ttl = floodTtl, protocol = PayloadProtocol.OUTPOST, payload = payload,
+        )
+        router.markOriginated(dg.id)
+        transmit(dg, trackFloodRepeat = true)
+        return dg.id
+    }
 
     /**
      * Sends a chat text. Broadcast → signed PUBLIC_TEXT. Unicast → encrypted DIRECT_TEXT

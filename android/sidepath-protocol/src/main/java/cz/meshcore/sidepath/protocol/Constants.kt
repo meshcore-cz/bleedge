@@ -116,6 +116,13 @@ object PayloadProtocol {
     const val SIDEPATH_CONTROL: Int = 0x0000
     const val MESHCORE_PACKET: Int = 0x0001
     const val SIDEPATH_CHAT: Int = 0x0100
+
+    /**
+     * Outpost community-layer frames (signed objects + sync control), carried opaquely. The service
+     * floods these to local peers and surfaces the raw payload to the app, which verifies and stores
+     * it. Independent of the MeshCore toggle so an Outpost board works over plain Sidepath.
+     */
+    const val OUTPOST: Int = 0x0200
 }
 
 /** Datagram routing flags (§6.3). */

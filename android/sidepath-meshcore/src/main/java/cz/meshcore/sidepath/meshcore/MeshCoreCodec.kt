@@ -71,6 +71,12 @@ data class MeshCoreDirectText(
     val text: String,
 )
 
+/** Decoded MeshCore GRP_DATA payload: an application data-type code and its binary body. */
+data class MeshCoreGrpData(
+    val dataType: Int,
+    val data: ByteArray,
+)
+
 /** Decoded MeshCore returned PATH payload, as returned by meshpkt's PATH ops. */
 data class MeshCoreReturnedPath(
     val destHash: String,
@@ -267,6 +273,34 @@ object MeshCoreCodec {
         val args = JSONArray().put(multipartPayload.toHex())
         val json = cz.meshcore.meshpkt.mobile.Mobile.call("decodeMultipart", args.toString())
         parseMultipartAckCrcJson(json)
+    }.getOrNull()
+
+    /**
+     * Builds a MeshCore GRP_DATA packet (group datagram) on channel [secret], carrying an
+     * application [dataType] and binary [data] (meshpkt's `encodeGrpDataSecret`). This is the
+     * standard MeshCore mechanism for non-text app payloads — no firmware change is required to send
+     * one. Returns the raw OTA packet bytes, or null on error / oversized data (max 255 bytes).
+     */
+    fun encodeGrpData(secret: ByteArray, dataType: Int, data: ByteArray): ByteArray? = runCatching {
+        val args = JSONArray().put(secret.toHex()).put(dataType).put(data.toHex())
+        val json = cz.meshcore.meshpkt.mobile.Mobile.call("encodeGrpDataSecret", args.toString())
+        val o = JSONObject(json)
+        if (o.has("error")) return null
+        o.optString("hex", "").takeIf { it.isNotEmpty() }?.hexToBytes()
+    }.getOrNull()
+
+    /**
+     * Decodes a GRP_DATA envelope [payload] (the bytes after the MeshCore header) with channel
+     * [secret] (meshpkt's `decodeGrpDataSecret`). Returns null when the channel hash / MAC don't
+     * match (i.e. this isn't our channel) or the shape is wrong.
+     */
+    fun decodeGrpData(secret: ByteArray, payload: ByteArray): MeshCoreGrpData? = runCatching {
+        val args = JSONArray().put(payload.toHex()).put(secret.toHex())
+        val json = cz.meshcore.meshpkt.mobile.Mobile.call("decodeGrpDataSecret", args.toString())
+        val o = JSONObject(json)
+        if (o.has("error")) return null
+        val dataHex = o.optString("dataHex", "")
+        MeshCoreGrpData(dataType = o.optInt("dataType", -1), data = if (dataHex.isEmpty()) ByteArray(0) else dataHex.hexToBytes())
     }.getOrNull()
 
     /**
