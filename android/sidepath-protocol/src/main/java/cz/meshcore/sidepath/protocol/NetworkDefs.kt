@@ -20,6 +20,8 @@ data class NetworkDef(
     val bandwidthHz: Long,
     val sf: Int,
     val cr: Int,
+    /** Default TX power in dBm a companion radio should use on this network; 0 = unspecified. */
+    val txPower: Int = 0,
     val analyzerUrls: List<String> = emptyList(),
     val mqtt: List<String> = emptyList(),
     val description: String = "",
@@ -62,6 +64,7 @@ object NetworkDefs {
             bandwidthHz = o.longOr("bandwidthHz"),
             sf = o.intOr("sf"),
             cr = o.intOr("cr"),
+            txPower = o.intOr("txPower"),
             analyzerUrls = o.stringList("analyzerUrls"),
             mqtt = o.stringList("mqtt"),
             description = o.stringOr("description"),
